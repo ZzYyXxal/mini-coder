@@ -1,0 +1,71 @@
+/* Mini-coder TUI styles */
+Screen {
+    layout: vertical;
+    background: $surface;
+}
+
+#main-container {
+    width: 1fr;
+    height: 1fr;
+}
+
+#content-area {
+    width: 1fr;
+    height: 3fr;
+    padding: 2 3;
+    overflow-y: auto;
+}
+
+#input-area {
+    min-height: 3;
+    padding: 0 2;
+    background: $panel;
+    border-top: solid $primary;
+}
+
+.prompt-indicator {
+    height: 1;
+    padding: 0 1;
+    align: left middle;
+}
+
+/* Visible text: rightmost widget, high contrast */
+.input-display {
+    width: 1fr;
+    min-width: 40;
+    height: 1;
+    color: white;
+    background: $panel;
+    padding: 0 1;
+}
+
+
+#welcome-message,
+#thinking-content,
+#default-message {
+    padding: 0;
+    margin: 0;
+}
+
+.welcome-text {
+    text-align: center;
+    padding: 2 0;
+}
+
+#mode-footer {
+    height: 1;
+    dock: bottom;
+    padding: 0 2;
+    background: $surface;
+    border-top: solid $primary;
+    align: right middle;
+}
+
+.mode-label {
+    color: $text-muted;
+}
+
+.mode-display {
+    color: $accent;
+    text-style: bold;
+}

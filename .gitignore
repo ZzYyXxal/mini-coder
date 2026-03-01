@@ -205,3 +205,30 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Claude Code
+.claude/
+
+# Cursor AI Editor
+.cursor/
+
+# OpenSpec tool state
+.openspec/
+
+# Linting and type checking
+.flake8
+.mypy.ini
+.dmypy.json
+
+# Configuration directories
+config/
+
+# Documentation
+docs/
+
+# Scripts
+scripts/
+
+# Temporary files
+subagent.md
+Untitled

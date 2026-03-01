@@ -1,0 +1,31 @@
+schema: spec-driven
+
+# Project context
+context: |
+  Tech stack: Python 3.10+, pytest, mypy, pydantic, chromadb, langgraph
+  Core principles:
+    - TDD (Test-Driven Development) with Red-Green-Refactor cycle
+    - Strict type hints (PEP 484) with full function signatures
+    - PEP 8 compliance enforced
+    - Token optimization: prefer targeted edits over full file rewrites
+    - Google-style docstrings for all public functions and classes
+  Domain: Multi-agent coding assistant with RAG-powered architectural guidance
+  Testing: pytest with >= 80% coverage requirement, mypy strict type checking
+  Architecture: 5 subagent system (Orchestrator, Architectural Consultant, Planner, Implementer, Tester)
+
+# Per-artifact rules
+rules:
+  proposal:
+    - Keep proposals concise (1-2 pages)
+    - Always separate New vs Modified capabilities
+  design:
+    - Include trade-offs and risk mitigation strategies
+    - Document alternatives considered with rationale
+  specs:
+    - Each requirement MUST have at least one scenario
+    - Use exactly 4 hashtags (####) for scenarios
+    - Use SHALL/MUST for normative requirements
+  tasks:
+    - Break tasks into session-sized chunks
+    - Order by dependency (what must be done first?)
+    - Each task must be verifiable
