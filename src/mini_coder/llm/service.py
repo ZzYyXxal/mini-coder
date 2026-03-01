@@ -1,219 +1,131 @@
 """LLM Service module.
 
-Provides unified service interface for LLM integration.
-Supports streaming responses and multiple provider management.
+使用 OpenAI SDK 兼容接口统一管理 LLM 服务。
+支持对话、流式响应、多轮对话。
 """
 
-import asyncio
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from .providers.base import LLMProvider
+from .providers.openai_compatible import OpenAICompatibleProvider
 
 
 class LLMService:
-    """LLM Service for managing provider connections and message sending."""
+    """LLM Service - 使用 OpenAI SDK 兼容接口。"""
 
     def __init__(self, config_path: str) -> None:
-        """Initialize LLM service with configuration.
+        """初始化 LLM 服务。
 
         Args:
-            config_path: Path to configuration YAML file.
+            config_path: 配置文件路径（YAML）。
         """
         self.config_path = config_path
-        self.provider: Optional[LLMProvider] = None
+        self.provider: Optional[OpenAICompatibleProvider] = None
+        self.provider_name: str = "zhipu"
         self._load_config()
 
     def _load_config(self) -> None:
-        """Load configuration from YAML file."""
+        """从 YAML 文件加载配置。"""
         import yaml
+        import os
+
         try:
             with open(self.config_path, 'r') as f:
                 config = yaml.safe_load(f)
-                self.provider_name = config.get('default_provider', 'anthropic')
+                self.provider_name = config.get('default_provider', 'zhipu')
 
-                # Get provider config
-                provider_config = config.get(self.provider_name, {})
+                # 获取提供商配置
+                providers = config.get('providers', {})
+                provider_config = providers.get(self.provider_name, {})
 
-                # Create provider instance
-                from .providers import anthropic, zhipu, openai, custom
+                # 从环境变量获取 API Key（优先级高于配置文件）
+                api_key = os.getenv(f"{self.provider_name.upper()}_API_KEY") or \
+                          provider_config.get('api_key', '')
 
-                if self.provider_name == 'anthropic':
-                    from .providers.anthropic import AnthropicProvider
-                    self.provider = AnthropicProvider(
-                        api_key=provider_config.get('api_key', ''),
-                        base_url=provider_config.get('base_url', 'https://api.anthropic.com'),
-                        model=provider_config.get('model', 'claude-3-5-sonnet-20241022'),
-                        max_tokens=provider_config.get('max_tokens', 4096),
-                        temperature=provider_config.get('temperature', 0.7)
-                    )
-
-                elif self.provider_name == 'zhipu':
-                    from .providers.zhipu import ZHIPUProvider
-                    self.provider = ZHIPUProvider(
-                        api_key=provider_config.get('api_key', ''),
-                        base_url=provider_config.get('base_url', 'https://open.bigmodel.cn/api/paas/v4/'),
-                        model=provider_config.get('model', ''),
-                        max_tokens=provider_config.get('max_tokens', 4096),
-                        temperature=provider_config.get('temperature', 0.7)
-                    )
-
-                elif self.provider_name == 'openai':
-                    from .providers.openai import OpenAIProvider
-                    self.provider = OpenAIProvider(
-                        api_key=provider_config.get('api_key', ''),
-                        base_url=provider_config.get('base_url', 'https://api.openai.com/v1/'),
-                        model=provider_config.get('model', 'gpt-4o-mini'),
-                        max_tokens=provider_config.get('max_tokens', 4096),
-                        temperature=provider_config.get('temperature', 0.7)
-                    )
-
-                elif self.provider_name == 'custom':
-                    from .providers.custom import CustomProvider
-                    self.provider = CustomProvider(
-                        api_key=provider_config.get('api_key', ''),
-                        base_url=provider_config.get('base_url', ''),
-                        model=provider_config.get('model', ''),
-                        max_tokens=provider_config.get('max_tokens', 4096),
-                        temperature=provider_config.get('temperature', 0.7),
-                        headers=provider_config.get('headers', {})
-                    )
+                # 创建统一的 OpenAI 兼容提供商
+                self.provider = OpenAICompatibleProvider(
+                    api_key=api_key,
+                    base_url=provider_config.get('base_url', ''),
+                    model=provider_config.get('model', ''),
+                )
 
         except FileNotFoundError:
-            # Config file not found, use defaults
-            self.provider_name = 'anthropic'
-            from .providers.anthropic import AnthropicProvider
-            self.provider = AnthropicProvider(
-                api_key='',
-                base_url='https://api.anthropic.com',
-                model='claude-3-5-sonnet-20241022',
-                max_tokens=4096,
-                temperature=0.7
+            # 配置文件不存在，使用默认值
+            self.provider_name = 'zhipu'
+            import os
+            self.provider = OpenAICompatibleProvider(
+                api_key=os.getenv("ZHIPU_API_KEY", ""),
+                base_url="https://open.bigmodel.cn/api/paas/v4/",
+                model="glm-5",
             )
 
-    async def send_message(
-        self, messages: List[Dict[str, str]], **kwargs
-    ) -> AsyncIterator[str]:
-        """Send messages and get response stream.
+    def chat(self, message: str, **kwargs) -> str:
+        """发送消息并获取响应（非流式）。
 
         Args:
-            messages: List of message dictionaries with 'role' and 'content'.
-            **kwargs: Additional keyword arguments.
+            message: 用户消息。
+            **kwargs: 额外参数。
 
         Returns:
-            AsyncIterator yielding response chunks.
+            AI 响应内容。
         """
         if self.provider is None:
-            raise ValueError("No LLM provider configured. Please set up a provider first.")
+            raise ValueError("No LLM provider configured.")
+        return self.provider.send_message(message, **kwargs)
 
-        return await self.provider.send_message(messages, **kwargs)
-
-    async def send_message_stream(
-        self, messages: List[Dict[str, str]], **kwargs
-    ) -> AsyncIterator[Dict[str, str]]:
-        """Send messages and get stream response in delta format.
+    def chat_stream(self, message: str, **kwargs):
+        """发送消息并获取流式响应。
 
         Args:
-            messages: List of message dictionaries with 'role' and 'content'.
-            **kwargs: Additional keyword arguments.
+            message: 用户消息。
+            **kwargs: 额外参数。
 
-        Returns:
-            AsyncIterator yielding delta events with type field:
-            - 'delta' for content updates
-            - 'message' for complete messages
+        Yields:
+            Dict 包含 type 和 content 字段。
         """
         if self.provider is None:
-            raise ValueError("No LLM provider configured. Please set up a provider first.")
+            raise ValueError("No LLM provider configured.")
+        return self.provider.send_message_stream(message, **kwargs)
 
-        return await self.provider.send_message_stream(messages, **kwargs)
+    async def async_chat(self, message: str, **kwargs) -> str:
+        """异步发送消息并获取响应。
+
+        Args:
+            message: 用户消息。
+            **kwargs: 额外参数。
+
+        Returns:
+            AI 响应内容。
+        """
+        if self.provider is None:
+            raise ValueError("No LLM provider configured.")
+        return await self.provider.async_send_message(message, **kwargs)
+
+    async def async_chat_stream(self, message: str, **kwargs):
+        """异步发送消息并获取流式响应。
+
+        Args:
+            message: 用户消息。
+            **kwargs: 额外参数。
+
+        Yields:
+            Dict 包含 type 和 content 字段。
+        """
+        if self.provider is None:
+            raise ValueError("No LLM provider configured.")
+        async for chunk in self.provider.async_send_message_stream(message, **kwargs):
+            yield chunk
+
+    def clear_history(self) -> None:
+        """清除对话历史。"""
+        if self.provider:
+            self.provider.clear_history()
 
     def set_provider(self, provider_name: str) -> None:
-        """Switch to a different LLM provider.
+        """切换提供商。
 
         Args:
-            provider_name: Name of the provider to switch to.
+            provider_name: 提供商名称。
         """
-        self._load_config()
         self.provider_name = provider_name
-
-        # Get provider config
-        provider_config = self.config.get(provider_name, {})
-
-        # Recreate provider
-        if provider_name == 'anthropic':
-            from .providers.anthropic import AnthropicProvider
-            self.provider = AnthropicProvider(
-                        api_key=provider_config.get('api_key', ''),
-                        base_url=provider_config.get('base_url', 'https://api.anthropic.com'),
-                        model=provider_config.get('model', 'claude-3-5-sonnet-20241022'),
-                        max_tokens=provider_config.get('max_tokens', 4096),
-                        temperature=provider_config.get('temperature', 0.7)
-                    )
-
-        elif provider_name == 'zhipu':
-            from .providers.zhipu import ZHIPUProvider
-            self.provider = ZHIPUProvider(
-                        api_key=provider_config.get('api_key', ''),
-                        base_url=provider_config.get('base_url', 'https://open.bigmodel.cn/api/paas/v4/'),
-                        model=provider_config.get('model', ''),
-                        max_tokens=provider_config.get('max_tokens', 4096),
-                        temperature=provider_config.get('temperature', 0.7)
-                    )
-
-        elif provider_name == 'openai':
-            from .providers.openai import OpenAIProvider
-            self.provider = OpenAIProvider(
-                        api_key=provider_config.get('api_key', ''),
-                        base_url=provider_config.get('base_url', 'https://api.openai.com/v1/'),
-                        model=provider_config.get('model', 'gpt-4o-mini'),
-                        max_tokens=provider_config.get('max_tokens', 4096),
-                        temperature=provider_config.get('temperature', 0.7)
-                    )
-
-        elif provider_name == 'custom':
-            from .providers.custom import CustomProvider
-            self.provider = CustomProvider(
-                        api_key=provider_config.get('api_key', ''),
-                        base_url=provider_config.get('base_url', ''),
-                        model=provider_config.get('model', ''),
-                        max_tokens=provider_config.get('max_tokens', 4096),
-                        temperature=provider_config.get('temperature', 0.7),
-                        headers=provider_config.get('headers', {})
-                    )
-
-        # Save updated config
-        self._save_config()
-
-    def _save_config(self) -> None:
-        """Save current configuration to YAML file."""
-        import yaml
-
-        # Get current config
-        try:
-            with open(self.config_path, 'r') as f:
-                config = yaml.safe_load(f)
-        except FileNotFoundError:
-                # Create default config if file doesn't exist
-                config = {
-                    'default_provider': 'anthropic',
-                    'anthropic': {
-                        'api_key': '',
-                        'base_url': 'https://api.anthropic.com',
-                        'model': 'claude-3-5-sonnet-20241022',
-                        'max_tokens': 4096,
-                        'temperature': 0.7
-                    }
-                }
-
-        # Update with current provider name
-        provider_name = config.get('default_provider', 'anthropic')
-        config[provider_name] = config.get(provider_name, {})
-
-        # Merge with provider config
-        for key in config[provider_name]:
-            if key not in config[provider_name]:
-                config[provider_name][key] = config.get(key, {})
-            config[provider_name]['name'] = self.provider_name
-
-        # Save
-        with open(self.config_path, 'w') as f:
-            yaml.safe_dump(config, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+        self._load_config()

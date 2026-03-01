@@ -4,6 +4,7 @@ This module provides a REPL-style interface for mini-coder,
 using Rich Console for output and handling user input directly.
 """
 
+import asyncio
 import io
 import logging
 import signal
@@ -264,6 +265,50 @@ class MiniCoderConsole:
             # EOF reached or stdin closed
             return None
 
+    def _get_llm_config_path(self) -> Path | None:
+        """Resolve path to LLM config (config/llm.yaml).
+
+        Prefers working_directory/config/llm.yaml, then cwd/config/llm.yaml.
+        """
+        for base in (self._working_directory, Path.cwd()):
+            if base is None:
+                continue
+            path = base / "config" / "llm.yaml"
+            if path.is_file():
+                return path
+        # Fallback: cwd when no working_directory set
+        path = Path.cwd() / "config" / "llm.yaml"
+        return path if path.is_file() else None
+
+    def _call_llm_stream_and_display(self, user_input: str) -> bool:
+        """Run streaming LLM call and display output (sync, optimized)."""
+        from mini_coder.llm.service import LLMService
+
+        llm_config_path = self._get_llm_config_path()
+        if not llm_config_path:
+            logging.warning("LLM config not found (config/llm.yaml); skipping LLM call")
+            return False
+        try:
+            # 复用 LLMService 实例（避免重复创建客户端）
+            if not hasattr(self, '_llm_service') or self._llm_service is None:
+                self._llm_service = LLMService(str(llm_config_path))
+
+            # 使用同步流式方法（避免 asyncio.run 开销）
+            first = True
+            for event in self._llm_service.chat_stream(user_input):
+                if event.get("type") == "delta":
+                    content = event.get("content") or ""
+                    if content:
+                        self._console.print(content, end="")
+                        if getattr(self._console, "file", None) is not None:
+                            self._console.file.flush()
+                        first = False
+            self._console.print()
+            return not first
+        except Exception as e:
+            logging.exception("LLM stream failed: %s", e)
+            return False
+
     def _display_thinking(self, message: str = "Processing...") -> None:
         """Display thinking status.
 
@@ -349,19 +394,22 @@ class MiniCoderConsole:
                 self.set_state(AppState.RUNNING)
                 logging.info(f"Processing user input: {user_input[:50]}...")
 
-                # Show thinking status
+                # Show thinking status, then newline so streamed response appears below
                 self._display_thinking("Processing your request...")
+                self._console.print()
 
-                # For now, just echo back (AI processing would go here)
+                # Stream LLM response and print as it arrives
+                ok = self._call_llm_stream_and_display(user_input)
                 self._console.print()
-                self._console.print(
-                    Panel(
-                        f"[bold]Input received:[/bold] {user_input}\n\n"
-                        "[dim]AI processing would happen here.[/dim]",
-                        border_style="blue",
+                if not ok:
+                    self._console.print(
+                        Panel(
+                            f"[bold]Input received:[/bold] {user_input}\n\n"
+                            "[dim]No response (check config/llm.yaml and API keys).[/dim]",
+                            border_style="blue",
+                        )
                     )
-                )
-                self._console.print()
+                    self._console.print()
 
                 self.set_state(AppState.IDLE)
 

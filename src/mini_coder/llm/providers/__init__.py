@@ -1,9 +1,9 @@
 """LLM Providers module initialization."""
 
-from .anthropic import AnthropicProvider
+from .openai_compatible import OpenAICompatibleProvider
 
 __all__ = [
-    'AnthropicProvider',
+    'OpenAICompatibleProvider',
 ]
 
-__version__ = '0.1.0'
+__version__ = '0.2.0'

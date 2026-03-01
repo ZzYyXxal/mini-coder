@@ -12,10 +12,6 @@ from pathlib import Path
 from mini_coder.tui.models.config import (AnimationSpeed, Config,
                                           ThinkingDensity)
 
-# Debug log file when TUI is running (so you can tail -f in another terminal)
-TUI_DEBUG_LOG = Path.cwd() / ".cursor" / "tui-debug.log"
-
-
 def parse_arguments() -> argparse.Namespace:
     """Parse command-line arguments for the TUI application.
 
@@ -84,33 +80,37 @@ def get_version() -> str:
         return "0.1.0"
 
 
-def setup_logging(level: int = logging.INFO) -> None:
+def setup_logging(level: int = logging.DEBUG) -> None:
     """Configure logging for the application.
 
-    Logs are also written to .cursor/tui-debug.log so you can inspect
-    them while the TUI is running (e.g. tail -f .cursor/tui-debug.log).
+    Logs go only to a file under a log directory (no console output),
+    so the TUI interface is not cluttered. Log file: logs/tui.log (under
+    cwd) or ~/.mini-coder/logs/tui.log.
 
     Args:
-        level: Logging level (default: INFO).
+        level: Logging level for the file (default: DEBUG).
     """
     fmt = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
     datefmt = "%Y-%m-%d %H:%M:%S"
-    logging.basicConfig(
-        level=level,
-        format=fmt,
-        datefmt=datefmt,
-    )
-    # Append debug log to file so it's visible while TUI is active
-    try:
-        TUI_DEBUG_LOG.parent.mkdir(parents=True, exist_ok=True)
-        fh = logging.FileHandler(TUI_DEBUG_LOG, mode="a", encoding="utf-8")
-        fh.setLevel(logging.DEBUG)
-        fh.setFormatter(logging.Formatter(fmt, datefmt=datefmt))
-        root = logging.getLogger()
-        root.addHandler(fh)
-        root.setLevel(logging.DEBUG)
-    except OSError:
-        pass
+    root = logging.getLogger()
+    root.handlers.clear()
+    root.setLevel(level)
+    for log_dir in (Path.cwd() / "logs", Path.home() / ".mini-coder" / "logs"):
+        try:
+            log_dir.mkdir(parents=True, exist_ok=True)
+            log_path = log_dir / "tui.log"
+            fh = logging.FileHandler(log_path, mode="a", encoding="utf-8")
+            fh.setLevel(level)
+            fh.setFormatter(logging.Formatter(fmt, datefmt=datefmt))
+            root.addHandler(fh)
+            break
+        except OSError:
+            continue
+    if not root.handlers:
+        # No file could be opened: add a null handler so nothing goes to console
+        root.addHandler(logging.NullHandler())
+    # Reduce noise from Rich's markdown parser
+    logging.getLogger("markdown_it").setLevel(logging.INFO)
 
 
 def load_config_with_args(args: argparse.Namespace) -> Config:

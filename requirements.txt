@@ -14,5 +14,8 @@ textual>=0.50.0
 rich>=13.0.0
 pyyaml>=6.0.0
 
+# LLM dependencies
+openai>=2.0.0
+
 # Build dependencies
 pyinstaller>=6.0.0
