@@ -223,7 +223,7 @@ __marimo__/
 # Configuration directories
 config/
 
-# Documentation
+# Documentation (development assistance, not for git)
 docs/
 
 # Scripts
