@@ -206,14 +206,32 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 
-# Claude Code
-.claude/
+# 1. OpenSpec (核心规范与变更)
+# 通常建议全部提交，因为它们是项目的功能定义
+# 如果有本地特定的调试文件可以排除
+.openspec/tmp/
+.openspec/*.log
 
-# Cursor AI Editor
-.cursor/
+# 2. Claude Code (.claude)
+# 排除本地会话、日志和个人凭证
+.claude/logs/
+.claude/sessions/
+.claude/debug/
+.claude/auth.json
+.claude/config.local.json
 
-# OpenSpec tool state
-.openspec/
+# 允许提交规则和全局设置
+!.claude/rules.md
+!.claude/settings.json
+
+# 3. Cursor (.cursor)
+# 排除本地索引、缓存和元数据
+.cursor/cache/
+.cursor/mcp/
+.cursor/state.json
+
+# 必须提交：项目自定义规则 (MDC 文件)
+!.cursor/rules/
 
 # Linting and type checking
 .flake8
