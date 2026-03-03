@@ -280,6 +280,54 @@ class MiniCoderConsole:
         path = Path.cwd() / "config" / "llm.yaml"
         return path if path.is_file() else None
 
+    # Loop detection constants
+    MAX_RESPONSE_LENGTH = 50000  # Maximum characters in a single response
+    MAX_REPEATED_PATTERN = 5     # Maximum times a pattern can repeat consecutively
+    PATTERN_MIN_LENGTH = 5       # Minimum length for pattern detection
+
+    def _detect_loop(self, content: str, full_response: str) -> bool:
+        """Detect if the LLM is in a loop.
+
+        Args:
+            content: The latest chunk of content.
+            full_response: The full response so far.
+
+        Returns:
+            True if a loop is detected, False otherwise.
+        """
+        # Check 1: Maximum response length
+        if len(full_response) > self.MAX_RESPONSE_LENGTH:
+            logging.warning(f"Loop detected: response exceeded {self.MAX_RESPONSE_LENGTH} chars")
+            return True
+
+        # Check 2: Repeated pattern detection
+        # Look for patterns that repeat consecutively
+        if len(content) >= self.PATTERN_MIN_LENGTH:
+            # Check if the last N chars repeat more than MAX_REPEATED_PATTERN times
+            for pattern_len in range(self.PATTERN_MIN_LENGTH, min(len(content) + 1, 50)):
+                pattern = content[-pattern_len:]
+                # Count consecutive repetitions at the end of full_response
+                count = 0
+                pos = len(full_response)
+                while pos >= pattern_len and full_response[pos - pattern_len:pos] == pattern:
+                    count += 1
+                    pos -= pattern_len
+
+                if count >= self.MAX_REPEATED_PATTERN:
+                    logging.warning(f"Loop detected: pattern '{pattern[:20]}...' repeated {count} times")
+                    return True
+
+        # Check 3: Known loop patterns (e.g., "Unknown" repeating)
+        known_patterns = ["Unknown", "undefined", "null", "NaN", "ERROR"]
+        for pattern in known_patterns:
+            # Check if pattern appears many times consecutively
+            repeated = pattern * self.MAX_REPEATED_PATTERN
+            if repeated in full_response:
+                logging.warning(f"Loop detected: known pattern '{pattern}' repeating")
+                return True
+
+        return False
+
     def _call_llm_stream_and_display(self, user_input: str) -> bool:
         """Run streaming LLM call and display output (sync, optimized)."""
         from mini_coder.llm.service import LLMService
@@ -292,22 +340,174 @@ class MiniCoderConsole:
             # 复用 LLMService 实例（避免重复创建客户端）
             if not hasattr(self, '_llm_service') or self._llm_service is None:
                 self._llm_service = LLMService(str(llm_config_path))
+                # 尝试恢复最近的会话，如果没有则启动新会话
+                if self._llm_service.memory_enabled:
+                    if not self._llm_service.restore_latest_session():
+                        # 没有可恢复的会话，启动新会话
+                        self._llm_service.start_session(str(self._working_directory) if self._working_directory else None)
 
             # 使用同步流式方法（避免 asyncio.run 开销）
             first = True
+            full_response = ""
+            loop_detected = False
+
             for event in self._llm_service.chat_stream(user_input):
                 if event.get("type") == "delta":
                     content = event.get("content") or ""
                     if content:
+                        full_response += content
+
+                        # Check for loop
+                        if self._detect_loop(content, full_response):
+                            loop_detected = True
+                            self._console.print()
+                            self._console.print(
+                                "\n[yellow]⚠ Response interrupted: loop detected[/yellow]"
+                            )
+                            logging.warning("LLM response interrupted due to loop detection")
+                            break
+
                         self._console.print(content, end="")
                         if getattr(self._console, "file", None) is not None:
                             self._console.file.flush()
                         first = False
+
             self._console.print()
+
+            if loop_detected:
+                self._console.print(
+                    "[dim]The AI response was interrupted to prevent infinite output. "
+                    "This may indicate an issue with the model or context.[/dim]"
+                )
+
             return not first
         except Exception as e:
             logging.exception("LLM stream failed: %s", e)
             return False
+
+    def _handle_special_commands(self, user_input: str) -> bool:
+        """Handle special commands like /memory, /sessions.
+
+        Args:
+            user_input: The user input to check.
+
+        Returns:
+            True if the input was a special command, False otherwise.
+        """
+        if not user_input.startswith("/"):
+            return False
+
+        command = user_input.lower().strip()
+
+        if command == "/memory":
+            self._show_memory_status()
+            return True
+
+        if command in ("/sessions", "/session"):
+            self._show_sessions()
+            return True
+
+        if command.startswith("/save"):
+            self._save_current_session()
+            return True
+
+        if command.startswith("/restore"):
+            self._restore_session(command)
+            return True
+
+        if command == "/help":
+            self._show_help()
+            return True
+
+        return False
+
+    def _show_memory_status(self) -> None:
+        """Display memory status."""
+        if not hasattr(self, '_llm_service') or self._llm_service is None:
+            self._console.print("[yellow]Memory: LLM service not initialized[/yellow]")
+            return
+
+        if not self._llm_service.memory_enabled:
+            self._console.print("[yellow]Memory: Disabled[/yellow]")
+            return
+
+        manager = self._llm_service._context_manager
+        self._console.print(Panel(
+            f"[bold]Memory Status[/bold]\n"
+            f"Session ID: {manager.current_session_id or 'None'}\n"
+            f"Messages: {manager.message_count}\n"
+            f"Token Ratio: {manager.token_ratio:.1%}",
+            border_style="blue"
+        ))
+
+    def _show_sessions(self) -> None:
+        """Display saved sessions."""
+        if not hasattr(self, '_llm_service') or self._llm_service is None:
+            self._console.print("[yellow]Sessions: LLM service not initialized[/yellow]")
+            return
+
+        sessions = self._llm_service.list_sessions()
+        if not sessions:
+            self._console.print("[yellow]No saved sessions[/yellow]")
+            return
+
+        self._console.print(Panel(
+            "[bold]Saved Sessions[/bold]\n" + "\n".join(f"  • {s}" for s in sessions),
+            border_style="blue"
+        ))
+
+    def _save_current_session(self) -> None:
+        """Save the current session."""
+        if not hasattr(self, '_llm_service') or self._llm_service is None:
+            self._console.print("[yellow]Session: LLM service not initialized[/yellow]")
+            return
+
+        if not self._llm_service.memory_enabled:
+            self._console.print("[yellow]Session: Memory disabled[/yellow]")
+            return
+
+        self._llm_service.save_session()
+        self._console.print(f"[green]Session saved: {self._llm_service.session_id}[/green]")
+
+    def _restore_session(self, command: str) -> None:
+        """Restore a session."""
+        if not hasattr(self, '_llm_service') or self._llm_service is None:
+            self._console.print("[yellow]Session: LLM service not initialized[/yellow]")
+            return
+
+        parts = command.split()
+        if len(parts) < 2:
+            # Try to restore latest session
+            if self._llm_service.restore_latest_session():
+                self._console.print(f"[green]Restored latest session: {self._llm_service.session_id}[/green]")
+            else:
+                self._console.print("[yellow]No session to restore[/yellow]")
+            return
+
+        session_id = parts[1]
+        if self._llm_service.load_session(session_id):
+            self._console.print(f"[green]Restored session: {session_id}[/green]")
+        else:
+            self._console.print(f"[red]Session not found: {session_id}[/red]")
+
+    def _show_help(self) -> None:
+        """Display help for special commands."""
+        self._console.print(Panel(
+            "[bold]Special Commands[/bold]\n"
+            "  /memory   - Show memory status\n"
+            "  /sessions - List saved sessions\n"
+            "  /save     - Save current session\n"
+            "  /restore  - Restore latest session\n"
+            "  /restore <id> - Restore specific session\n"
+            "  /help     - Show this help",
+            border_style="blue"
+        ))
+
+    def _cleanup(self) -> None:
+        """Cleanup resources before exit."""
+        if hasattr(self, '_llm_service') and self._llm_service is not None:
+            if self._llm_service.memory_enabled:
+                self._llm_service.save_session()
 
     def _display_thinking(self, message: str = "Processing...") -> None:
         """Display thinking status.
@@ -390,6 +590,10 @@ class MiniCoderConsole:
                 if not user_input:
                     continue
 
+                # Handle special commands
+                if self._handle_special_commands(user_input):
+                    continue
+
                 # Process the input
                 self.set_state(AppState.RUNNING)
                 logging.info(f"Processing user input: {user_input[:50]}...")
@@ -414,6 +618,10 @@ class MiniCoderConsole:
                 self.set_state(AppState.IDLE)
 
             self._console.print("[yellow]Goodbye![/yellow]")
+
+            # Save session before exit
+            self._cleanup()
+
             return 0
 
         except Exception as e:

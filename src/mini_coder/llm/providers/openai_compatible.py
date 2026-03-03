@@ -5,11 +5,17 @@
 """
 
 import json
+import logging
 from typing import Dict, Generator, List
 
 import httpx
 
 from .base import LLMProvider
+
+# Token estimation: ~4 chars per token for Chinese/English mixed content
+CHARS_PER_TOKEN = 4
+# Maximum tokens to send in context (leave room for response)
+MAX_CONTEXT_TOKENS = 100000
 
 
 class OpenAICompatibleProvider(LLMProvider):
@@ -50,10 +56,53 @@ class OpenAICompatibleProvider(LLMProvider):
             )
         return self._client
 
+    def _estimate_tokens(self, text: str) -> int:
+        """Estimate token count for text.
+
+        Args:
+            text: Text to estimate.
+
+        Returns:
+            Estimated token count.
+        """
+        # Simple estimation: ~4 chars per token for mixed content
+        # More accurate would be to use tiktoken, but this is fast
+        return max(1, len(text) // CHARS_PER_TOKEN)
+
     def _build_messages(self, user_message: str) -> List[Dict[str, str]]:
-        """构建消息列表。"""
+        """构建消息列表，带token限制。
+
+        Ensures total context doesn't exceed MAX_CONTEXT_TOKENS.
+        Recent messages are prioritized over older ones.
+        """
         messages = [{"role": "system", "content": self._system_prompt}]
-        messages.extend(self._conversation)
+        system_tokens = self._estimate_tokens(self._system_prompt)
+        user_tokens = self._estimate_tokens(user_message) + 10  # overhead
+
+        # Calculate available tokens for history
+        available_tokens = MAX_CONTEXT_TOKENS - system_tokens - user_tokens
+
+        # Add history messages from newest to oldest until token limit
+        history_messages = []
+        current_tokens = 0
+
+        # Iterate in reverse to prioritize recent messages
+        for msg in reversed(self._conversation):
+            msg_tokens = self._estimate_tokens(msg.get("content", "")) + 10
+            if current_tokens + msg_tokens > available_tokens:
+                # Skip older messages if they would exceed limit
+                logging.debug(f"Skipping older message: {msg_tokens} tokens")
+                break
+            history_messages.insert(0, msg)  # Insert at beginning to maintain order
+            current_tokens += msg_tokens
+
+        if len(history_messages) < len(self._conversation):
+            logging.info(
+                f"Context trimmed: {len(history_messages)}/{len(self._conversation)} messages, "
+                f"~{current_tokens} tokens"
+            )
+
+        messages.extend(history_messages)
         messages.append({"role": "user", "content": user_message})
         return messages
 
@@ -143,3 +192,70 @@ class OpenAICompatibleProvider(LLMProvider):
         """异步流式发送（使用同步实现）。"""
         for chunk in self.send_message_stream(message, **kwargs):
             yield chunk
+
+    def send_with_context(
+        self,
+        messages: List[Dict[str, str]],
+        **kwargs
+    ) -> Generator[Dict, None, None]:
+        """发送预构建的消息列表并获取流式响应。
+
+        用于 GSSC 流水线集成，接受外部构建的消息列表。
+
+        Args:
+            messages: 预构建的消息列表，包含 role 和 content。
+            **kwargs: 额外参数。
+
+        Yields:
+            Dict 包含 type 和 content 字段。
+        """
+        client = self._get_client()
+        url = f"{self._base_url}/chat/completions"
+
+        payload = {
+            "model": self._model,
+            "messages": messages,
+            "stream": True,
+            **kwargs
+        }
+
+        headers = {
+            "Authorization": self._api_key,
+            "Content-Type": "application/json",
+        }
+
+        full_content = ""
+
+        with client.stream("POST", url, json=payload, headers=headers) as response:
+            for line in response.iter_lines():
+                if not line:
+                    continue
+                if line.startswith("data: "):
+                    data_str = line[6:]
+                    if data_str == "[DONE]":
+                        break
+                    try:
+                        data = json.loads(data_str)
+                        if data.get("choices"):
+                            delta = data["choices"][0].get("delta", {})
+                            content = delta.get("content") or delta.get("reasoning_content") or ""
+                            if content:
+                                full_content += content
+                                yield {"type": "delta", "content": content}
+                    except json.JSONDecodeError:
+                        continue
+
+        # 更新内部历史以保持一致性
+        if full_content:
+            # 获取最后一条用户消息
+            last_user_msg = None
+            for msg in reversed(messages):
+                if msg.get("role") == "user":
+                    last_user_msg = msg.get("content", "")
+                    break
+
+            if last_user_msg:
+                self.add_to_history("user", last_user_msg)
+            self.add_to_history("assistant", full_content)
+
+        yield {"type": "done", "content": ""}

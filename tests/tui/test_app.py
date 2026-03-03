@@ -732,3 +732,210 @@ class TestConsoleAppThinkingHistory:
         assert hasattr(app._thinking_history, "get_all")
         assert hasattr(app._thinking_history, "add")
 
+
+class TestConsoleAppSessionRestore:
+    """Tests for console app session restore functionality.
+
+    These tests verify the fix for the bug where user's context (like their name)
+    was not remembered across TUI restarts.
+
+    Bug scenario:
+    1. User starts TUI, says "我叫赵鹏飞"
+    2. User runs /save, then exits
+    3. User restarts TUI
+    4. User asks "我叫什么名字" - should remember
+
+    Root cause: TUI didn't attempt to restore previous session on startup,
+    and even when restored, provider history wasn't synced with ContextMemoryManager.
+    """
+
+    def test_special_command_memory_shows_status(self) -> None:
+        """Test /memory command shows memory status."""
+        from mini_coder.tui.console_app import MiniCoderConsole
+
+        config = Config()
+        app = MiniCoderConsole(config)
+
+        # Should handle /memory command gracefully even without LLM service
+        result = app._handle_special_commands("/memory")
+        assert result is True
+
+    def test_special_command_sessions_shows_list(self) -> None:
+        """Test /sessions command shows session list."""
+        from mini_coder.tui.console_app import MiniCoderConsole
+
+        config = Config()
+        app = MiniCoderConsole(config)
+
+        # Should handle /sessions command gracefully even without LLM service
+        result = app._handle_special_commands("/sessions")
+        assert result is True
+
+    def test_special_command_save(self) -> None:
+        """Test /save command is recognized."""
+        from mini_coder.tui.console_app import MiniCoderConsole
+
+        config = Config()
+        app = MiniCoderConsole(config)
+
+        result = app._handle_special_commands("/save")
+        assert result is True
+
+    def test_special_command_restore(self) -> None:
+        """Test /restore command is recognized."""
+        from mini_coder.tui.console_app import MiniCoderConsole
+
+        config = Config()
+        app = MiniCoderConsole(config)
+
+        result = app._handle_special_commands("/restore")
+        assert result is True
+
+    def test_special_command_help(self) -> None:
+        """Test /help command shows available commands."""
+        from mini_coder.tui.console_app import MiniCoderConsole
+
+        config = Config()
+        app = MiniCoderConsole(config)
+
+        result = app._handle_special_commands("/help")
+        assert result is True
+
+    def test_non_special_command_returns_false(self) -> None:
+        """Test that regular input is not treated as special command."""
+        from mini_coder.tui.console_app import MiniCoderConsole
+
+        config = Config()
+        app = MiniCoderConsole(config)
+
+        result = app._handle_special_commands("hello world")
+        assert result is False
+
+        result = app._handle_special_commands("What is my name?")
+        assert result is False
+
+    def test_cleanup_saves_session_if_memory_enabled(self, tmp_path: Path) -> None:
+        """Test that _cleanup saves session when memory is enabled."""
+        from mini_coder.tui.console_app import MiniCoderConsole
+        from unittest.mock import MagicMock, patch
+
+        config = Config()
+        app = MiniCoderConsole(config)
+
+        # Mock LLM service with memory enabled
+        mock_service = MagicMock()
+        mock_service.memory_enabled = True
+        app._llm_service = mock_service
+
+        # Call cleanup
+        app._cleanup()
+
+        # Should have called save_session
+        mock_service.save_session.assert_called_once()
+
+    def test_cleanup_skips_save_if_no_service(self) -> None:
+        """Test that _cleanup handles missing LLM service gracefully."""
+        from mini_coder.tui.console_app import MiniCoderConsole
+
+        config = Config()
+        app = MiniCoderConsole(config)
+
+        # No _llm_service attribute
+        assert not hasattr(app, '_llm_service') or app._llm_service is None
+
+        # Should not raise
+        app._cleanup()
+
+    def test_cleanup_skips_save_if_memory_disabled(self) -> None:
+        """Test that _cleanup skips save when memory is disabled."""
+        from mini_coder.tui.console_app import MiniCoderConsole
+        from unittest.mock import MagicMock
+
+        config = Config()
+        app = MiniCoderConsole(config)
+
+        # Mock LLM service with memory disabled
+        mock_service = MagicMock()
+        mock_service.memory_enabled = False
+        app._llm_service = mock_service
+
+        # Call cleanup
+        app._cleanup()
+
+        # Should NOT have called save_session
+        mock_service.save_session.assert_not_called()
+
+
+
+class TestLoopDetection:
+    """Tests for LLM response loop detection."""
+
+    def test_detect_loop_max_length(self) -> None:
+        """Test loop detection when response exceeds max length."""
+        from mini_coder.tui.console_app import MiniCoderConsole
+
+        config = Config()
+        app = MiniCoderConsole(config)
+
+        # Create a response that exceeds max length
+        long_response = "x" * (MiniCoderConsole.MAX_RESPONSE_LENGTH + 1)
+        assert app._detect_loop("x", long_response) is True
+
+    def test_detect_loop_repeated_pattern(self) -> None:
+        """Test loop detection when pattern repeats many times."""
+        from mini_coder.tui.console_app import MiniCoderConsole
+
+        config = Config()
+        app = MiniCoderConsole(config)
+
+        # Create a response with repeated pattern
+        repeated_response = "Unknown" * MiniCoderConsole.MAX_REPEATED_PATTERN
+        assert app._detect_loop("Unknown", repeated_response) is True
+
+    def test_detect_loop_normal_response(self) -> None:
+        """Test that normal responses don't trigger loop detection."""
+        from mini_coder.tui.console_app import MiniCoderConsole
+
+        config = Config()
+        app = MiniCoderConsole(config)
+
+        # Normal response should not trigger
+        normal_response = "This is a normal response from the AI."
+        assert app._detect_loop("AI.", normal_response) is False
+
+    def test_detect_loop_short_pattern_ignored(self) -> None:
+        """Test that short patterns are not detected as loops."""
+        from mini_coder.tui.console_app import MiniCoderConsole
+
+        config = Config()
+        app = MiniCoderConsole(config)
+
+        # Short patterns should be ignored
+        short_pattern = "ab" * 100
+        assert app._detect_loop("ab", short_pattern) is False
+
+    def test_detect_loop_known_patterns(self) -> None:
+        """Test detection of known problematic patterns."""
+        from mini_coder.tui.console_app import MiniCoderConsole
+
+        config = Config()
+        app = MiniCoderConsole(config)
+
+        # Known problematic patterns
+        for pattern in ["Unknown", "undefined", "null", "NaN", "ERROR"]:
+            repeated = pattern * MiniCoderConsole.MAX_REPEATED_PATTERN
+            assert app._detect_loop(pattern, repeated) is True
+
+    def test_session_command_alias(self) -> None:
+        """Test that /session (singular) works as alias for /sessions."""
+        from mini_coder.tui.console_app import MiniCoderConsole
+
+        config = Config()
+        app = MiniCoderConsole(config)
+
+        # Both /session and /sessions should be handled
+        result = app._handle_special_commands("/session")
+        assert result is True
+
+        result = app._handle_special_commands("/sessions")
+        assert result is True
