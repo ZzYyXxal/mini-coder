@@ -30,7 +30,9 @@ class LLMService:
         self,
         config_path: str,
         enable_memory: bool = True,
-        enable_notes: bool = True
+        enable_notes: bool = True,
+        auto_extract_notes: bool = False,
+        extraction_confidence: float = 0.8
     ) -> None:
         """初始化 LLM 服务。
 
@@ -38,17 +40,23 @@ class LLMService:
             config_path: 配置文件路径（YAML）。
             enable_memory: 是否启用上下文记忆管理。
             enable_notes: 是否启用项目笔记管理（NoteTool-like）。
+            auto_extract_notes: 是否自动从响应中提取笔记。
+            extraction_confidence: 自动提取的置信度阈值。
         """
         self.config_path = config_path
         self.provider: Optional[OpenAICompatibleProvider] = None
         self.provider_name: str = "zhipu"
         self._enable_memory = enable_memory
         self._enable_notes = enable_notes
+        self._auto_extract_notes = auto_extract_notes
+        self._extraction_confidence = extraction_confidence
         self._context_manager = None
         self._context_builder = None
         self._notes_manager = None
+        self._note_extractor = None
         self._load_config()
         self._init_memory()
+        self._init_note_extractor()
 
     def _load_config(self) -> None:
         """从 YAML 文件加载配置。"""
@@ -132,6 +140,59 @@ class LLMService:
             self._context_manager = None
             self._context_builder = None
             self._notes_manager = None
+
+    def _init_note_extractor(self) -> None:
+        """Initialize note extractor for auto-extraction."""
+        if not self._auto_extract_notes or not self._notes_manager:
+            return
+
+        try:
+            from mini_coder.memory import NoteExtractor
+            self._note_extractor = NoteExtractor(
+                confidence_threshold=self._extraction_confidence
+            )
+        except ImportError:
+            self._note_extractor = None
+
+    def _extract_and_save_notes(self, response: str) -> int:
+        """Extract and save notes from LLM response.
+
+        Args:
+            response: The LLM response text.
+
+        Returns:
+            Number of notes extracted and saved.
+        """
+        if not self._note_extractor or not self._notes_manager:
+            return 0
+
+        try:
+            extracted = self._note_extractor.extract(response)
+            saved_count = 0
+
+            for note in extracted:
+                if note.confidence >= self._extraction_confidence:
+                    self._notes_manager.add_note(
+                        category=note.category,
+                        title=note.title,
+                        content=note.content,
+                        tags=["auto-extracted"]
+                    )
+                    saved_count += 1
+                else:
+                    # Low confidence - save with pending confirmation tag
+                    self._notes_manager.add_note(
+                        category=note.category,
+                        title=f"[待确认] {note.title}",
+                        content=note.content,
+                        tags=["auto-extracted", "needs-confirmation"]
+                    )
+                    saved_count += 1
+
+            return saved_count
+        except Exception as e:
+            logging.warning(f"Failed to extract notes: {e}")
+            return 0
 
     @property
     def memory_enabled(self) -> bool:
@@ -363,6 +424,12 @@ class LLMService:
         # 5. Complete - 添加完整响应到上下文
         if self._context_manager and full_response:
             self._context_manager.add_message("assistant", full_response)
+
+        # 6. Auto-extract - 自动提取笔记
+        if self._auto_extract_notes and self._note_extractor and full_response:
+            extracted = self._extract_and_save_notes(full_response)
+            if extracted > 0:
+                yield {"type": "system", "content": f"[自动提取 {extracted} 条笔记]"}
 
     async def async_chat(self, message: str, **kwargs) -> str:
         """异步发送消息并获取响应。
@@ -643,4 +710,131 @@ class LLMService:
         if not self._notes_manager:
             return {"total": 0, "active": 0}
         return self._notes_manager.get_stats()
+
+    # ==================== Semantic Search & Relations ====================
+
+    def search_notes_semantic(
+        self,
+        query: str,
+        top_k: int = 5,
+        threshold: float = 0.7
+    ) -> List[Dict]:
+        """语义搜索笔记。
+
+        Args:
+            query: 搜索查询。
+            top_k: 返回的最大结果数。
+            threshold: 相似度阈值。
+
+        Returns:
+            匹配的笔记列表（包含相似度分数）。
+        """
+        if not self._notes_manager:
+            return []
+
+        notes = self._notes_manager.search_notes(
+            query=query,
+            semantic=True,
+            top_k=top_k,
+            threshold=threshold
+        )
+        return [
+            {
+                "id": n.id,
+                "category": n.category,
+                "title": n.title,
+                "content": n.content[:100] + "..." if len(n.content) > 100 else n.content,
+                "tags": n.tags,
+            }
+            for n in notes
+        ]
+
+    def add_relation(
+        self,
+        source_id: str,
+        target_id: str,
+        relation_type: str = "related_to"
+    ) -> bool:
+        """添加笔记关系。
+
+        Args:
+            source_id: 源笔记 ID。
+            target_id: 目标笔记 ID。
+            relation_type: 关系类型 (related_to, depends_on, blocks, implements, supersedes, derived_from)。
+
+        Returns:
+            是否成功添加。
+        """
+        if not self._notes_manager:
+            return False
+
+        source_note = self._notes_manager.get_note(source_id)
+        target_note = self._notes_manager.get_note(target_id)
+
+        if not source_note or not target_note:
+            return False
+
+        source_note.add_relation(target_id, relation_type)
+        self._notes_manager._save_project_notes()
+        return True
+
+    def get_related_notes(
+        self,
+        note_id: str,
+        depth: int = 1
+    ) -> List[Dict]:
+        """获取相关笔记。
+
+        Args:
+            note_id: 笔记 ID。
+            depth: 关系深度（1 = 直接相关，2 = 间接相关）。
+
+        Returns:
+            相关笔记列表。
+        """
+        if not self._notes_manager:
+            return []
+
+        # Get the note
+        note = self._notes_manager.get_note(note_id)
+        if not note:
+            return []
+
+        # Get directly related notes
+        related_ids = note.relations.copy()
+        result = []
+
+        # BFS for depth > 1
+        if depth > 1:
+            visited = set(related_ids)
+            visited.add(note_id)
+            current_level = related_ids.copy()
+
+            for _ in range(depth - 1):
+                next_level = []
+                for rid in current_level:
+                    related_note = self._notes_manager.get_note(rid)
+                    if related_note:
+                        for nid in related_note.relations:
+                            if nid not in visited:
+                                visited.add(nid)
+                                next_level.append(nid)
+                related_ids.extend(next_level)
+                current_level = next_level
+
+        # Build result
+        for rid in related_ids:
+            related_note = self._notes_manager.get_note(rid)
+            if related_note:
+                relation_type = note.relation_types.get(rid, "related_to")
+                result.append({
+                    "id": related_note.id,
+                    "category": related_note.category,
+                    "title": related_note.title,
+                    "content": related_note.content[:100] + "..." if len(related_note.content) > 100 else related_note.content,
+                    "tags": related_note.tags,
+                    "relation_type": relation_type,
+                })
+
+        return result
 

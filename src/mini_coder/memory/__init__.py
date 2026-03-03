@@ -12,6 +12,7 @@ Key Components:
     - PersistentStore: Disk-based session and summary storage
     - ContextBuilder: GSSC pipeline for building context
     - ProjectNotesManager: Structured project notes (NoteTool-like)
+    - NoteExtractor: Auto-extraction of notes from LLM responses
 
 Example:
     >>> from mini_coder.memory import ContextMemoryManager, MemoryConfig
@@ -31,6 +32,15 @@ from .persistent_store import PersistentStore
 from .manager import ContextMemoryManager
 from .context_builder import ContextBuilder
 from .project_notes import ProjectNote, ProjectNotesManager, NoteCategory, NoteStatus
+from .note_extractor import NoteExtractor, ExtractedNote, ExtractionSource
+from .note_relations import (
+    RelationType,
+    NoteRelation,
+    NoteRelationManager,
+    AutoRelationDetector,
+)
+from .embeddings import LocalEmbeddingService, EmbeddingConfig, EMBEDDINGS_AVAILABLE
+from .semantic_search import SemanticNoteSearch, SemanticSearchConfig
 
 __all__ = [
     # Main interface
@@ -59,4 +69,20 @@ __all__ = [
     "ProjectNotesManager",
     "NoteCategory",
     "NoteStatus",
+    # Note Extraction
+    "NoteExtractor",
+    "ExtractedNote",
+    "ExtractionSource",
+    # Note Relations
+    "RelationType",
+    "NoteRelation",
+    "NoteRelationManager",
+    "AutoRelationDetector",
+    # Embeddings
+    "LocalEmbeddingService",
+    "EmbeddingConfig",
+    "EMBEDDINGS_AVAILABLE",
+    # Semantic Search
+    "SemanticNoteSearch",
+    "SemanticSearchConfig",
 ]

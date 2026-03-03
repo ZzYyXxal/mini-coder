@@ -47,7 +47,7 @@ The mini-coder project utilizes a structured multi-agent system for code generat
 
 | Agent | Purpose | Description |
 |--------|----------|-------------|
-| **Claude Code** | Orchestrator | Coordinates all agents, manages overall workflow state |
+| **Orchestrator** | Orchestrator | Coordinates all agents, manages overall workflow state |
 | **Architectural Consultant** | Design | Provides technical architecture guidance, validates design patterns, ensures best practices |
 | **Planner** | Planning | Breaks down tasks into actionable steps, creates implementation plans with dependencies |
 | **Implementer** | Implementation | Generates code following specifications and TDD principles, handles edge cases |

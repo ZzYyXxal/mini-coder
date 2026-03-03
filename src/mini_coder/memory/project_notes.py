@@ -61,6 +61,10 @@ class ProjectNote(BaseModel):
         created_at: When the note was created.
         updated_at: When the note was last updated.
         metadata: Additional metadata.
+        relations: IDs of related notes.
+        relation_types: Map of note_id -> relation_type.
+        embedding: Vector embedding for semantic search.
+        embedding_model: Model used to generate embedding.
     """
 
     id: str = Field(default_factory=lambda: uuid4().hex[:8])
@@ -73,6 +77,24 @@ class ProjectNote(BaseModel):
     created_at: datetime = Field(default_factory=datetime.now)
     updated_at: datetime = Field(default_factory=datetime.now)
     metadata: dict[str, Any] = Field(default_factory=dict)
+    # Relation support
+    relations: list[str] = Field(
+        default_factory=list,
+        description="IDs of related notes"
+    )
+    relation_types: dict[str, str] = Field(
+        default_factory=dict,
+        description="Map of note_id -> relation_type"
+    )
+    # Semantic search support
+    embedding: Optional[list[float]] = Field(
+        default=None,
+        description="Vector embedding for semantic search"
+    )
+    embedding_model: Optional[str] = Field(
+        default=None,
+        description="Model used to generate embedding"
+    )
 
     def touch(self) -> None:
         """Update the updated_at timestamp."""
@@ -81,6 +103,63 @@ class ProjectNote(BaseModel):
     def is_active(self) -> bool:
         """Check if note is still active."""
         return self.status == NoteStatus.ACTIVE
+
+    def add_relation(
+        self,
+        note_id: str,
+        relation_type: str = "related_to"
+    ) -> None:
+        """Add a relation to another note.
+
+        Args:
+            note_id: ID of the related note.
+            relation_type: Type of relation (related_to, depends_on, etc.).
+        """
+        if note_id not in self.relations:
+            self.relations.append(note_id)
+            self.relation_types[note_id] = relation_type
+            self.touch()
+
+    def remove_relation(self, note_id: str) -> None:
+        """Remove a relation to another note.
+
+        Args:
+            note_id: ID of the note to remove relation to.
+        """
+        if note_id in self.relations:
+            self.relations.remove(note_id)
+            self.relation_types.pop(note_id, None)
+            self.touch()
+
+    def get_related_notes(
+        self,
+        relation_type: Optional[str] = None
+    ) -> list[str]:
+        """Get IDs of related notes.
+
+        Args:
+            relation_type: Optional filter by relation type.
+
+        Returns:
+            List of related note IDs.
+        """
+        if relation_type is None:
+            return self.relations.copy()
+        return [
+            nid for nid in self.relations
+            if self.relation_types.get(nid) == relation_type
+        ]
+
+    def needs_embedding(self, model_name: str) -> bool:
+        """Check if note needs (re)embedding.
+
+        Args:
+            model_name: The embedding model name to check against.
+
+        Returns:
+            True if embedding is missing or from a different model.
+        """
+        return self.embedding is None or self.embedding_model != model_name
 
     def format_for_context(self) -> str:
         """Format note for inclusion in LLM context."""
@@ -138,11 +217,22 @@ class ProjectNotesManager:
         >>> context = manager.format_notes_for_context()
     """
 
-    def __init__(self, storage_path: str = "~/.mini-coder/notes"):
+    def __init__(
+        self,
+        storage_path: str = "~/.mini-coder/notes",
+        enable_semantic_search: bool = False,
+        enable_relations: bool = True,
+        auto_detect_relations: bool = False,
+        relation_threshold: float = 0.75
+    ):
         """Initialize the notes manager.
 
         Args:
             storage_path: Base path for note storage.
+            enable_semantic_search: Enable semantic search (requires embeddings).
+            enable_relations: Enable note relations.
+            auto_detect_relations: Automatically detect relations for new notes.
+            relation_threshold: Similarity threshold for auto-detection.
         """
         self.path = Path(storage_path).expanduser()
         self.path.mkdir(parents=True, exist_ok=True)
@@ -150,6 +240,35 @@ class ProjectNotesManager:
         # Cache of notes by project
         self._notes: dict[str, list[ProjectNote]] = {}
         self._current_project: Optional[str] = None
+
+        # Semantic search (optional)
+        self._semantic_search = None
+        self._enable_semantic_search = enable_semantic_search
+        if enable_semantic_search:
+            try:
+                from .embeddings import LocalEmbeddingService
+                from .semantic_search import SemanticNoteSearch
+                embedding_service = LocalEmbeddingService()
+                if embedding_service.is_available:
+                    self._semantic_search = SemanticNoteSearch(self, embedding_service)
+            except ImportError:
+                pass
+
+        # Note relations (optional)
+        self._relation_manager = None
+        self._auto_detect_relations = auto_detect_relations
+        self._relation_threshold = relation_threshold
+        if enable_relations:
+            try:
+                from .note_relations import NoteRelationManager, AutoRelationDetector
+                self._relation_manager = NoteRelationManager(self)
+                self._auto_detector = AutoRelationDetector(
+                    self,
+                    self._relation_manager,
+                    similarity_threshold=relation_threshold
+                )
+            except ImportError:
+                pass
 
     def set_project(self, project_path: Optional[str]) -> None:
         """Set the current project context.
@@ -253,6 +372,14 @@ class ProjectNotesManager:
 
         self._notes[key].append(note)
         self._save_project_notes(project_path)
+
+        # Auto-detect relations if enabled
+        if self._auto_detect_relations and self._relation_manager:
+            try:
+                from .note_relations import AutoRelationDetector
+                self._auto_detector.detect_relations(note, auto_link=True)
+            except Exception:
+                pass  # Don't fail note creation if relation detection fails
 
         return note
 
@@ -393,11 +520,20 @@ class ProjectNotesManager:
 
         return notes
 
-    def search_notes(self, query: str) -> list[ProjectNote]:
+    def search_notes(
+        self,
+        query: str,
+        semantic: bool = False,
+        top_k: int = 10,
+        threshold: float = 0.7
+    ) -> list[ProjectNote]:
         """Search notes by content.
 
         Args:
             query: Search query.
+            semantic: Use semantic search if available.
+            top_k: Maximum results for semantic search.
+            threshold: Similarity threshold for semantic search.
 
         Returns:
             List of matching notes.
@@ -407,6 +543,12 @@ class ProjectNotesManager:
         if key not in self._notes:
             return []
 
+        # Try semantic search first if requested and available
+        if semantic and self._semantic_search:
+            results = self._semantic_search.search(query, top_k=top_k, threshold=threshold)
+            return [note for note, score in results]
+
+        # Fallback to keyword search
         query_lower = query.lower()
         matches = []
 
@@ -422,7 +564,7 @@ class ProjectNotesManager:
             return (0 if title_match else 1, n.created_at)
 
         matches.sort(key=sort_key, reverse=True)
-        return matches
+        return matches[:top_k]
 
     def format_notes_for_context(
         self,
