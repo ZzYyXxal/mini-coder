@@ -7,9 +7,8 @@
 import logging
 import re
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 
-from .providers.base import LLMProvider
 from .providers.openai_compatible import OpenAICompatibleProvider
 
 # Patterns that might confuse the model or indicate commands
@@ -32,7 +31,8 @@ class LLMService:
         enable_memory: bool = True,
         enable_notes: bool = True,
         auto_extract_notes: bool = False,
-        extraction_confidence: float = 0.8
+        extraction_confidence: float = 0.8,
+        enable_command_tool: bool = True,
     ) -> None:
         """初始化 LLM 服务。
 
@@ -42,6 +42,7 @@ class LLMService:
             enable_notes: 是否启用项目笔记管理（NoteTool-like）。
             auto_extract_notes: 是否自动从响应中提取笔记。
             extraction_confidence: 自动提取的置信度阈值。
+            enable_command_tool: 是否启用命令执行工具。
         """
         self.config_path = config_path
         self.provider: Optional[OpenAICompatibleProvider] = None
@@ -50,13 +51,18 @@ class LLMService:
         self._enable_notes = enable_notes
         self._auto_extract_notes = auto_extract_notes
         self._extraction_confidence = extraction_confidence
+        self._enable_command_tool = enable_command_tool
         self._context_manager = None
         self._context_builder = None
         self._notes_manager = None
         self._note_extractor = None
+        self._command_tool = None
+        self._tools_registry: Dict[str, Any] = {}
         self._load_config()
         self._init_memory()
         self._init_note_extractor()
+        self._init_command_tool()
+        self._init_tools_registry()
 
     def _load_config(self) -> None:
         """从 YAML 文件加载配置。"""
@@ -73,8 +79,9 @@ class LLMService:
                 provider_config = providers.get(self.provider_name, {})
 
                 # 从环境变量获取 API Key（优先级高于配置文件）
-                api_key = os.getenv(f"{self.provider_name.upper()}_API_KEY") or \
-                          provider_config.get('api_key', '')
+                api_key = os.getenv(f"{self.provider_name.upper()}_API_KEY")
+                if not api_key:
+                    api_key = provider_config.get('api_key', '')
 
                 # 创建统一的 OpenAI 兼容提供商
                 self.provider = OpenAICompatibleProvider(
@@ -153,6 +160,69 @@ class LLMService:
             )
         except ImportError:
             self._note_extractor = None
+
+    def _init_command_tool(self) -> None:
+        """初始化命令执行工具。"""
+        if not self._enable_command_tool:
+            return
+
+        try:
+            import yaml
+            from mini_coder.tools import (
+                CommandTool,
+                PermissionService,
+                SecurityMode,
+            )
+
+            # 尝试加载工具配置
+            config_dir = Path(self.config_path).parent
+            tools_config_path = config_dir / "tools.yaml"
+
+            security_mode = SecurityMode.NORMAL
+            timeout = 120
+            permission_cache_enabled = True
+
+            if tools_config_path.exists():
+                with open(tools_config_path, 'r') as f:
+                    config_data = yaml.safe_load(f)
+                    command_config = config_data.get('command', {})
+
+                    # 安全模式
+                    mode_str = command_config.get('security_mode', 'normal')
+                    security_mode = SecurityMode.from_string(mode_str)
+
+                    # 超时设置
+                    timeout_config = command_config.get('timeout', {})
+                    timeout = timeout_config.get('default', 120)
+
+                    # 权限缓存
+                    perm_config = command_config.get('permission', {})
+                    permission_cache_enabled = perm_config.get('cache_enabled', True)
+
+            # 初始化权限服务
+            permission_service = PermissionService()
+            if permission_cache_enabled:
+                permission_service.auto_approve_session()
+
+            # 初始化命令工具
+            self._command_tool = CommandTool(
+                security_mode=security_mode,
+                permission_service=permission_service,
+                timeout=timeout,
+            )
+
+        except ImportError as e:
+            logging.warning(f"Failed to initialize CommandTool: {e}")
+            self._command_tool = None
+        except Exception as e:
+            logging.warning(f"Failed to initialize CommandTool: {e}")
+            self._command_tool = None
+
+    def _init_tools_registry(self) -> None:
+        """初始化工具注册表。"""
+        # 注册命令工具
+        if self._command_tool:
+            self._tools_registry["Command"] = self._command_tool
 
     def _extract_and_save_notes(self, response: str) -> int:
         """Extract and save notes from LLM response.
@@ -711,6 +781,99 @@ class LLMService:
             return {"total": 0, "active": 0}
         return self._notes_manager.get_stats()
 
+    # ==================== Command Tool Integration ====================
+
+    @property
+    def command_tool_enabled(self) -> bool:
+        """检查是否启用了命令执行工具。"""
+        return self._enable_command_tool and self._command_tool is not None
+
+    def execute_command(
+        self,
+        command: str,
+        timeout: Optional[int] = None
+    ) -> Optional[Dict[str, Any]]:
+        """执行命令（通过 CommandTool）。
+
+        Args:
+            command: 要执行的命令。
+            timeout: 可选的超时时间（秒）。
+
+        Returns:
+            执行结果字典，包含：
+                - success: bool, 是否成功
+                - stdout: str, 标准输出
+                - stderr: str, 错误输出
+                - exit_code: int, 退出码
+                - execution_time_ms: int, 执行时间
+            如果命令工具未启用，返回 None。
+        """
+        if not self._command_tool:
+            return None
+
+        # 设置会话 ID（如果有）
+        if self._context_manager and self._context_manager.current_session_id:
+            self._command_tool.set_session_id(self._context_manager.current_session_id)
+
+        # 执行命令
+        result = self._command_tool._execute_with_security(command, timeout)
+
+        return {
+            "success": result.success,
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+            "exit_code": result.exit_code,
+            "execution_time_ms": result.execution_time_ms,
+        }
+
+    def is_command_safe(self, command: str) -> tuple[bool, str]:
+        """检查命令是否安全。
+
+        Args:
+            command: 要检查的命令。
+
+        Returns:
+            tuple[bool, str]: (是否安全，原因)
+        """
+        if not self._command_tool:
+            return True, "命令工具未启用"
+        return self._command_tool.is_command_safe(command)
+
+    def get_available_commands(self) -> Dict[str, Any]:
+        """获取可用的命令列表。
+
+        Returns:
+            包含 safe_commands, banned_commands, requires_confirmation 的字典。
+        """
+        if not self._command_tool:
+            return {"safe_commands": [], "banned_commands": [], "requires_confirmation": []}
+        return self._command_tool.get_available_commands()
+
+    def get_registered_tools(self) -> Dict[str, Any]:
+        """获取已注册的工具字典。
+
+        Returns:
+            工具名称到工具实例的映射。
+        """
+        return self._tools_registry.copy()
+
+    def register_tool(self, name: str, tool: Any) -> None:
+        """注册自定义工具。
+
+        Args:
+            name: 工具名称。
+            tool: 工具实例。
+        """
+        self._tools_registry[name] = tool
+
+    def unregister_tool(self, name: str) -> None:
+        """注销工具。
+
+        Args:
+            name: 工具名称。
+        """
+        self._tools_registry.pop(name, None)
+
     # ==================== Semantic Search & Relations ====================
 
     def search_notes_semantic(
@@ -837,4 +1000,3 @@ class LLMService:
                 })
 
         return result
-

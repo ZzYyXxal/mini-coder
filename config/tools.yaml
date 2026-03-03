@@ -1,0 +1,54 @@
+# Tools Configuration
+# 工具配置文件
+
+# Command Tool Settings
+# 命令执行工具配置
+command:
+  # 安全模式：strict, normal, trust
+  # - strict: 只有白名单命令可以执行
+  # - normal: 黑名单 + 白名单 + 权限确认（默认）
+  # - trust: 只有黑名单检查，其他直接执行
+  security_mode: normal
+
+  # 超时设置（秒）
+  timeout:
+    default: 120    # 默认超时 2 分钟
+    max: 600        # 最大超时 10 分钟
+
+  # 输出限制
+  max_output_length: 30000  # 30KB
+
+  # 权限缓存配置
+  permission:
+    cache_enabled: true
+    cache_ttl: 3600  # 1 小时
+
+  # 允许的工作目录
+  allowed_paths:
+    - ${PROJECT_ROOT}
+    - /tmp
+
+  # 自定义黑名单（追加到默认黑名单）
+  banned_commands:
+    - my_dangerous_command
+
+  # 自定义白名单（追加到默认白名单）
+  safe_commands:
+    - my_safe_command
+
+# Tool Filter Settings
+# 工具过滤器配置
+tool_filter:
+  # 子代理默认使用的过滤器类型
+  default_for_subagent: readonly
+
+  # 不同类型代理的过滤器配置
+  agent_filters:
+    # explore 代理 - 只读
+    explore: readonly
+    # plan 代理 - 只读
+    plan: readonly
+    # code 代理 - 完全访问（排除危险工具）
+    code: full_access
+    # 自定义代理 - 严格模式
+    custom: strict

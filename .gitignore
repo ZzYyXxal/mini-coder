@@ -242,9 +242,10 @@ knowledge-base/
 
 # Configuration directories
 config/
+!config/tools.yaml
 
 # Documentation (development assistance, not for git)
-docs/
+# docs/ is now tracked - contains design docs for developers
 .docs/
 
 # 项目运行时与本地数据（日志、报告、覆盖率等）
