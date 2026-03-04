@@ -243,6 +243,7 @@ knowledge-base/
 # Configuration directories
 config/
 !config/tools.yaml
+!config/llm.yaml
 
 # Documentation (development assistance, not for git)
 # docs/ is now tracked - contains design docs for developers

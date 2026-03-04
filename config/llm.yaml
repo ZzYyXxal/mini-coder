@@ -1,0 +1,43 @@
+# LLM Service Configuration
+# LLM 服务配置文件 - 使用 OpenAI API 兼容模式
+
+# 默认服务提供商
+default_provider: "dashscope"
+
+# OpenAI API 兼容的服务提供商配置
+# 所有提供商都使用 OpenAI SDK 兼容的接口
+providers:
+  zhipu:
+    api_key: "ZHIPU_API_KEY"  # 通过环境变量 ZHIPU_API_KEY 设置
+    base_url: "https://open.bigmodel.cn/api/paas/v4/"
+    model: "glm-5"
+
+  anthropic:
+    api_key: ""  # 建议通过环境变量 ANTHROPIC_API_KEY 设置
+    base_url: "https://api.anthropic.com/v1/"
+    model: "claude-3-5-sonnet-20241022"
+
+  openai:
+    api_key: ""  # 建议通过环境变量 OPENAI_API_KEY 设置
+    base_url: "https://api.openai.com/v1/"
+    model: "gpt-4o-mini"
+
+  # 阿里云百炼（DashScope）- 千问等模型，OpenAI 兼容接口
+  # 地域可选：北京 dashscope.aliyuncs.com | 新加坡 dashscope-intl.aliyuncs.com | 美国 dashscope-us.aliyuncs.com
+  dashscope:
+    api_key: "DASHSCOPE_API_KEY"  # 通过环境变量 DASHSCOPE_API_KEY 设置（百炼控制台获取，如需 Bearer 格式可设为 "Bearer sk-xxx"）
+    base_url: "https://coding.dashscope.aliyuncs.com/v1"
+    model: "qwen3.5-plus"  # 可选: qwen-turbo, qwen-plus, qwen-max, qwen3-max 等
+
+  custom:
+    api_key: ""
+    base_url: ""
+    model: ""
+    headers: {}
+
+# 配置说明：
+# - 所有提供商使用 OpenAI SDK 兼容接口
+# - temperature 和 max_tokens 由代码自动计算/使用模型默认值
+# - 多轮对话通过维护 messages 历史实现
+# - 切换为百炼：default_provider 设为 "dashscope"，并设置环境变量 DASHSCOPE_API_KEY
+# - 百炼模型参考：https://help.aliyun.com/zh/model-studio/
