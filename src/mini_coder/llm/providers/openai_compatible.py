@@ -39,6 +39,15 @@ class OpenAICompatibleProvider(LLMProvider):
         self._client: httpx.Client | None = None
         self._conversation: List[Dict[str, str]] = []
 
+    def _auth_header(self) -> str:
+        """返回 Authorization 头取值。多数 OpenAI 兼容接口（含百炼 DashScope）要求 Bearer 前缀。"""
+        key = (self._api_key or "").strip()
+        if not key:
+            return ""
+        if key.lower().startswith("bearer "):
+            return key
+        return f"Bearer {key}"
+
     @property
     def name(self) -> str:
         return "openai_compatible"
@@ -127,7 +136,7 @@ class OpenAICompatibleProvider(LLMProvider):
         }
 
         headers = {
-            "Authorization": self._api_key,
+            "Authorization": self._auth_header(),
             "Content-Type": "application/json",
         }
 
@@ -154,7 +163,7 @@ class OpenAICompatibleProvider(LLMProvider):
         }
 
         headers = {
-            "Authorization": self._api_key,
+            "Authorization": self._auth_header(),
             "Content-Type": "application/json",
         }
 
@@ -220,7 +229,7 @@ class OpenAICompatibleProvider(LLMProvider):
         }
 
         headers = {
-            "Authorization": self._api_key,
+            "Authorization": self._auth_header(),
             "Content-Type": "application/json",
         }
 

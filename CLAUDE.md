@@ -51,6 +51,7 @@ The mini-coder project utilizes a structured multi-agent system for code generat
 | **Architectural Consultant** | Design | Provides technical architecture guidance, validates design patterns, ensures best practices |
 | **Planner** | Planning | Breaks down tasks into actionable steps, creates implementation plans with dependencies |
 | **Implementer** | Implementation | Generates code following specifications and TDD principles, handles edge cases |
+| **Code Reviewer** | Review | Reviews changes for architecture alignment and code quality before tests run; gates entry to Environment Tester |
 | **Environment Tester** | QA | Validates environment configuration, runs tests, ensures quality gates |
 
 ### Workflow Stages
@@ -69,10 +70,13 @@ The mini-coder project utilizes a structured multi-agent system for code generat
    ├─ Implementer generates code
    │  └─ Test-Driven Development: Red → Green → Refactor
    └─ Code follows PEP 8, type hints, quality standards
-       └─ Environment Tester validates quality (tests, coverage, linting)
 
-4. Testing & QA
-   ├─ Environment Tester runs automated checks
+4. Code Review
+   ├─ Code Reviewer checks architecture alignment and code quality (no test execution)
+   └─ Pass → Environment Tester; Reject → back to Implementer
+
+5. Testing & QA
+   ├─ Environment Tester runs automated checks (pytest, mypy, coverage)
    ├─ Code verification against requirements
    └─ Quality gates (>=80% coverage, PEP 8 compliance, type safety)
 ```
@@ -110,7 +114,8 @@ When a task requires coordination:
 1. **Architectural Consultant** - Analyzes requirements, provides design patterns, ensures adherence to best practices
 2. **Planner** - Creates detailed task breakdown, identifies dependencies, estimates complexity
 3. **Implementer** - Generates code following the plan with TDD workflow
-4. **Environment Tester** - Validates that all quality gates are met (coverage, linting, type checking)
+4. **Code Reviewer** - Reviews changes for architecture alignment and code quality (static/structure only); rejects or passes to Tester
+5. **Environment Tester** - Validates that all quality gates are met (coverage, linting, type checking)
 
 ---
 
@@ -211,6 +216,7 @@ Orchestrator communicates with each subagent through standardized messages:
 - **Architectural Consultant**: Design specifications, architecture reviews
 - **Planner**: Task breakdowns, implementation plans
 - **Implementer**: Code generation, refactoring suggestions
+- **Code Reviewer**: Pass/reject with brief reasons and actionable suggestions
 - **Environment Tester**: Test results, quality metrics
 
 ---
@@ -245,9 +251,10 @@ When using the multi-agent coding workflow:
 2. **Start with Design**: Always consult Architectural Consultant before writing code
 3. **Plan Thoroughly**: Use Planner to break down complex tasks into manageable steps
 4. **Follow TDD**: Write tests first, implement to make tests pass
-5. **Validate Quality**: Always run Environment Tester before considering work complete
-6. **Document Changes**: Keep CLAUDE.md updated with workflow modifications
-7. **Use Orchestrator**: For complex tasks requiring multiple agent coordination
+5. **Pass Code Review**: Ensure changes pass Code Reviewer (architecture + quality) before running tests
+6. **Validate Quality**: Always run Environment Tester before considering work complete
+7. **Document Changes**: Keep CLAUDE.md updated with workflow modifications
+8. **Use Orchestrator**: For complex tasks requiring multiple agent coordination
 
 ---
 
