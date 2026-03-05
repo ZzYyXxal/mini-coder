@@ -86,6 +86,9 @@ class UIState:
     thinking_visible: bool = False
     working_mode: WorkingMode = WorkingMode.PLAN  # Deprecated, kept for compatibility
 
+    # Debug mode
+    debug_mode: bool = False  # Debug 模式：显示思考过程和上下文
+
     # Agent display state (new)
     current_agent: Optional[AgentDisplay] = AgentDisplay.MAIN  # 默认为主 Agent
     agent_history: List[Dict[str, Any]] = None  # List of {agent, status, timestamp}
@@ -180,6 +183,10 @@ class MiniCoderConsole:
         """Display the welcome message."""
         self._console.print()
         header_text = "[bold cyan]mini-coder[/bold cyan] [dim]AI Coding Assistant[/dim]"
+
+        # Add debug indicator
+        if self._ui_state.debug_mode:
+            header_text += "  [bold yellow][DEBUG][/bold yellow]"
 
         # Add working directory if set
         if self._working_directory:
@@ -393,6 +400,10 @@ class MiniCoderConsole:
             logging.warning("LLM config not found (config/llm.yaml); skipping LLM call")
             return False
         try:
+            # Debug 模式：显示上下文信息
+            if self._ui_state.debug_mode:
+                self._show_debug_context(user_input)
+
             # 使用同步流式方法（避免 asyncio.run 开销）
             first = True
             full_response = ""
@@ -427,10 +438,47 @@ class MiniCoderConsole:
                     "This may indicate an issue with the model or context.[/dim]"
                 )
 
+            # Debug 模式：显示额外信息
+            if self._ui_state.debug_mode:
+                self._show_debug_response_info(full_response)
+
             return not first
         except Exception as e:
             logging.exception("LLM stream failed: %s", e)
             return False
+
+    def _show_debug_context(self, user_input: str) -> None:
+        """Debug 模式下显示 LLM 上下文信息。"""
+        self._console.print("\n[dim bold]=== LLM Context (Debug) ===[/dim bold]")
+
+        # 显示上下文统计
+        if hasattr(self._llm_service, '_context_builder') and self._llm_service._context_builder:
+            builder = self._llm_service._context_builder
+            try:
+                context = builder.build_with_user_message(user_input, max_tokens=128000)
+                total_tokens = builder.estimate_tokens(context)
+                msg_count = len(context)
+
+                self._console.print(f"[dim]Messages: {msg_count} | Tokens: ~{total_tokens:,}[/dim]")
+
+                # 显示 system 消息预览
+                for msg in context:
+                    if msg.get("role") == "system":
+                        content = msg.get("content", "")[:200]
+                        self._console.print(f"[dim]System: {content}...[/dim]")
+                        break
+            except Exception as e:
+                self._console.print(f"[dim]Context build error: {e}[/dim]")
+        else:
+            self._console.print("[dim]Context builder not available[/dim]")
+
+        self._console.print()
+
+    def _show_debug_response_info(self, response: str) -> None:
+        """Debug 模式下显示响应信息。"""
+        self._console.print()
+        self._console.print("[dim bold]=== Response Stats (Debug) ===[/dim bold]")
+        self._console.print(f"[dim]Response Length: {len(response)} chars[/dim]")
 
     def _handle_special_commands(self, user_input: str) -> bool:
         """Handle special commands like /memory, /sessions.
@@ -475,6 +523,23 @@ class MiniCoderConsole:
                 self._console.print(f"[dim yellow]清除对话历史时出错：{e}[/dim yellow]")
             return True
 
+        if command == "/debug":
+            # 切换 debug 模式
+            self._ui_state.debug_mode = not self._ui_state.debug_mode
+            status = "已开启" if self._ui_state.debug_mode else "已关闭"
+            self._console.print(f"[dim]Debug 模式{status}。再次输入 /debug 切换。[/dim]")
+            if self._ui_state.debug_mode:
+                self._console.print("[dim] 将显示思考过程和 LLM 上下文信息[/dim]")
+            return True
+
+        if command == "/context":
+            # 显示当前 LLM 上下文
+            if hasattr(self, '_llm_service') and self._llm_service is not None:
+                self._show_context_info()
+            else:
+                self._console.print("[dim]LLM 服务未初始化[/dim]")
+            return True
+
         if command == "/help":
             self._show_help()
             return True
@@ -510,6 +575,38 @@ class MiniCoderConsole:
             f"Token Ratio: {manager.token_ratio:.1%}",
             border_style="blue"
         ))
+
+    def _show_context_info(self) -> None:
+        """Display current LLM context info."""
+        if not hasattr(self, '_llm_service') or self._llm_service is None:
+            self._console.print("[yellow]LLM service not initialized[/yellow]")
+            return
+
+        self._console.print(Panel(
+            f"[bold]LLM Context Info[/bold]\n\n"
+            f"Provider: {self._llm_service.provider_name}\n"
+            f"Memory Enabled: {self._llm_service.memory_enabled}\n"
+            f"Auto-extract Notes: {self._llm_service._auto_extract_notes}\n",
+            border_style="blue"
+        ))
+
+        # Show context builder info if available
+        if hasattr(self._llm_service, '_context_builder') and self._llm_service._context_builder:
+            builder = self._llm_service._context_builder
+            context = builder.build_with_user_message("test", max_tokens=128000)
+            total_tokens = builder.estimate_tokens(context)
+            msg_count = len(context)
+
+            self._console.print(Panel(
+                f"[bold]Context Stats[/bold]\n\n"
+                f"Messages: {msg_count}\n"
+                f"Estimated Tokens: {total_tokens:,}\n"
+                f"Max Tokens: 128,000\n"
+                f"Usage: {total_tokens/128000*100:.1f}%",
+                border_style="green"
+            ))
+        else:
+            self._console.print("[dim]Context builder not available[/dim]")
 
     def _show_sessions(self) -> None:
         """Display saved sessions."""
@@ -571,6 +668,8 @@ class MiniCoderConsole:
             "  /restore  - Restore latest session\n"
             "  /restore <id> - Restore specific session\n"
             "  /clear    - Clear chat history\n"
+            "  /debug    - Toggle debug mode (show thinking & context)\n"
+            "  /context  - Show current LLM context info\n"
             "  /agents   - Show agent history\n"
             "  /tools    - Show recent tool calls\n"
             "  /help     - Show this help",

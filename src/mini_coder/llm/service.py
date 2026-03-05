@@ -88,7 +88,7 @@ class LLMService:
                     api_key=api_key,
                     base_url=provider_config.get('base_url', ''),
                     model=provider_config.get('model', ''),
-                    system_prompt="你是一个简洁、有用的 AI 助手。请直接回答问题，不需要展示思考过程。",
+                    system_prompt="你是一个简洁、有用的 AI 助手。请直接给出答案，不要在回复中展示思考过程。思考应该在内部完成。",
                 )
 
         except FileNotFoundError:
@@ -99,7 +99,7 @@ class LLMService:
                 api_key=os.getenv("ZHIPU_API_KEY", ""),
                 base_url="https://open.bigmodel.cn/api/paas/v4/",
                 model="glm-5",
-                system_prompt="你是一个简洁、有用的 AI 助手。请直接回答问题，不需要展示思考过程。",
+                system_prompt="你是一个简洁、有用的 AI 助手。请直接给出答案，不要在回复中展示思考过程。思考应该在内部完成。",
             )
 
     def _init_memory(self) -> None:
