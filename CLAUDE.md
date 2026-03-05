@@ -45,41 +45,71 @@ The mini-coder project utilizes a structured multi-agent system for code generat
 
 ### Agent Roles
 
-| Agent | Purpose | Description |
-|--------|----------|-------------|
-| **Orchestrator** | Orchestrator | Coordinates all agents, manages overall workflow state |
-| **Architectural Consultant** | Design | Provides technical architecture guidance, validates design patterns, ensures best practices |
-| **Planner** | Planning | Breaks down tasks into actionable steps, creates implementation plans with dependencies |
-| **Implementer** | Implementation | Generates code following specifications and TDD principles, handles edge cases |
-| **Code Reviewer** | Review | Reviews changes for architecture alignment and code quality before tests run; gates entry to Environment Tester |
-| **Environment Tester** | QA | Validates environment configuration, runs tests, ensures quality gates |
+**5 Core Subagents** (with dynamic prompt loading):
+
+| Agent | Purpose | Tool Filter |
+|-------|---------|-------------|
+| **Explorer** | Read-only codebase search | ReadOnlyFilter |
+| **Planner** | Requirements analysis and TDD planning | PlannerFilter (ReadOnly + WebSearch) |
+| **Coder** | Code implementation following TDD | FullAccessFilter |
+| **Reviewer** | Code quality review (merged architecture alignment) | ReadOnlyFilter |
+| **Bash** | Terminal execution and test validation | BashRestrictedFilter |
+
+**Expert Agents** (optional):
+- ArchitecturalConsultant: Removed (not needed)
+- CodeReviewer: Merged into Reviewer
 
 ### Workflow Stages
 
 ```
-1. Requirement Analysis
-   ├─ User Request
-   └─ Architectural Consultant analyzes requirements
-       └─ Planner creates task breakdown
+1. Explorer (Optional)
+   └─ Explore codebase structure, find relevant files
 
-2. Design
-   ├─ Architectural Consultant validates architecture
-   └─ Planner creates technical specifications
+2. Planner
+   ├─ Analyze requirements
+   └─ Create TDD implementation plan
 
-3. Implementation
-   ├─ Implementer generates code
-   │  └─ Test-Driven Development: Red → Green → Refactor
-   └─ Code follows PEP 8, type hints, quality standards
+3. Coder
+   ├─ Write tests first (Red)
+   ├─ Implement to pass tests (Green)
+   └─ Refactor if needed
 
-4. Code Review
-   ├─ Code Reviewer checks architecture alignment and code quality (no test execution)
-   └─ Pass → Environment Tester; Reject → back to Implementer
+4. Reviewer
+   ├─ Architecture alignment check
+   └─ Code quality review (type hints, docstrings, PEP 8)
+   └─ Pass → Bash; Reject → back to Coder
 
-5. Testing & QA
-   ├─ Environment Tester runs automated checks (pytest, mypy, coverage)
-   ├─ Code verification against requirements
-   └─ Quality gates (>=80% coverage, PEP 8 compliance, type safety)
+5. Bash
+   ├─ Run pytest tests
+   ├─ Run mypy type check
+   ├─ Run flake8 lint
+   └─ Generate quality report
 ```
+
+---
+
+## Multi-Agent System Architecture
+
+### Dynamic Prompt Loading
+
+The system uses "Code Framework + Dynamic Prompt Injection" hybrid mode:
+
+- **Prompt Storage**: `prompts/system/*.md` (separate from `knowledge-base/` which stores external references)
+- **PromptLoader**: Loads prompts from files with placeholder interpolation (`{{identifier}}` syntax)
+- **Fallback**: Built-in default prompts when files are missing
+
+### Subagent Dispatch
+
+The `WorkflowOrchestrator` provides:
+- `_analyze_intent()`: Keyword-based intent analysis (Chinese and English)
+- `_create_subagent()`: Factory method for agent instantiation
+- `dispatch()`: Direct subagent invocation
+
+### Tool Security
+
+- **ToolFilter**: Controls agent tool access
+- **BashRestrictedFilter**: Command whitelist/blacklist/confirm mechanism
+- **Command Security**: Only whitelisted commands execute directly
 
 ---
 

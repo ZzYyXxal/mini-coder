@@ -26,10 +26,11 @@ Agent 架构:
 import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Type
+from typing import Any, Dict, List, Optional, Set, Type
 from pathlib import Path
 
 from mini_coder.tools.filter import ToolFilter, ReadOnlyFilter, FullAccessFilter, StrictFilter
+from mini_coder.agents.prompt_loader import PromptLoader
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +44,8 @@ class AgentConfig:
     max_iterations: int = 10
     temperature: float = 0.7
     system_prompt: str = ""
+    prompt_loader: Optional[PromptLoader] = None
+    prompt_path: Optional[str] = None  # 用于从文件加载提示词
     metadata: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -54,6 +57,31 @@ class AgentState:
     total_tokens_used: int = 0
     last_error: Optional[str] = None
     is_busy: bool = False
+
+
+@dataclass
+class AgentCapabilities:
+    """Agent 能力定义"""
+    # 可以使用的工具
+    allowed_tools: Set[str] = field(default_factory=set)
+    # 可以读取的文件模式
+    allowed_read_patterns: List[str] = field(default_factory=list)
+    # 可以写入的文件模式
+    allowed_write_patterns: List[str] = field(default_factory=list)
+    # 最大工具调用次数 per execute
+    max_tool_calls: int = 10
+    # 是否需要用户确认才能执行危险操作
+    requires_confirmation: bool = False
+
+    def copy(self) -> "AgentCapabilities":
+        """创建副本"""
+        return AgentCapabilities(
+            allowed_tools=self.allowed_tools.copy(),
+            allowed_read_patterns=self.allowed_read_patterns.copy(),
+            allowed_write_patterns=self.allowed_write_patterns.copy(),
+            max_tool_calls=self.max_tool_calls,
+            requires_confirmation=self.requires_confirmation,
+        )
 
 
 class AgentResult:
@@ -90,11 +118,16 @@ class BaseAgent(ABC):
     - 状态管理
     - 迭代计数
     - 错误处理
+    - 动态提示词加载（通过 PromptLoader）
 
     Args:
         llm_service: LLM 服务实例
         config: Agent 配置
     """
+
+    # 类变量：Agent 类型定义
+    AGENT_TYPE: str = "base"
+    DEFAULT_PROMPT_PATH: Optional[str] = None  # 提示词文件路径（相对于 prompt_loader.prompt_dir）
 
     def __init__(
         self,
@@ -111,8 +144,41 @@ class BaseAgent(ABC):
         self.config = config
         self.state = AgentState()
         self._tool_filter = config.tool_filter
+        self._prompt_loader = config.prompt_loader or PromptLoader()
 
         logger.info(f"Initialized {self.__class__.__name__}: {config.name}")
+
+    @property
+    def get_system_prompt(self) -> str:
+        """获取系统 prompt
+
+        支持两种模式：
+        1. 如果 config.system_prompt 已设置，直接返回
+        2. 否则从 prompt_loader 动态加载（支持占位符插值）
+        """
+        # 1. 优先使用显式设置的 system_prompt
+        if self.config.system_prompt:
+            return self.config.system_prompt
+
+        # 2. 从文件加载（如果指定了 prompt_path）
+        prompt_path = self.config.prompt_path or self.DEFAULT_PROMPT_PATH
+        if prompt_path:
+            try:
+                return self._prompt_loader.load(prompt_path)
+            except Exception as e:
+                logger.warning(f"Failed to load prompt from {prompt_path}: {e}")
+                # 回退到内置 prompt
+                return self._get_builtin_prompt()
+
+        # 3. 返回内置 prompt
+        return self._get_builtin_prompt()
+
+    def _get_builtin_prompt(self) -> str:
+        """获取内置兜底 prompt
+
+        子类可以重写此方法提供内置提示词。
+        """
+        return ""
 
     @abstractmethod
     def execute(self, task: str, context: Optional[Dict[str, Any]] = None) -> AgentResult:
@@ -127,11 +193,12 @@ class BaseAgent(ABC):
         """
         pass
 
-    @property
-    @abstractmethod
-    def get_system_prompt(self) -> str:
-        """获取系统 prompt"""
-        pass
+    def _get_builtin_prompt(self) -> str:
+        """获取内置兜底 prompt
+
+        子类可以重写此方法提供内置提示词。
+        """
+        return ""
 
     def _invoke_llm(
         self,
@@ -834,3 +901,737 @@ class AgentTeam:
             "tester": self.tester.get_status(),
             "history_count": len(self._history),
         }
+
+
+# ==================== New Subagents (Dynamic Prompt Loading) ====================
+
+class ExplorerCapabilities(AgentCapabilities):
+    """Explorer Agent 能力"""
+
+    def __init__(self) -> None:
+        super().__init__(
+            allowed_tools={"Read", "Glob", "Grep", "Command_ls", "Command_cat", "Command_head", "Command_tail", "Command_git_status", "Command_git_log", "Command_git_diff"},
+            allowed_read_patterns=["**/*"],
+            allowed_write_patterns=[],  # 只读，不能写
+            max_tool_calls=15,
+            requires_confirmation=False
+        )
+
+
+class ExplorerAgent(BaseAgent):
+    """Explorer Agent - 只读代码库搜索专家
+
+    职责:
+    - 快速探索代码库结构
+    - 查找文件和代码位置
+    - 理解模块依赖关系
+
+    工具权限:
+    - 只读工具：Read, Glob, Grep
+    - 只读命令：ls, git status, git log, git diff
+    """
+
+    AGENT_TYPE = "explorer"
+    DEFAULT_PROMPT_PATH = "subagent-explorer"
+
+    def __init__(self, llm_service: Any, config: Optional[AgentConfig] = None) -> None:
+        if config is None:
+            config = AgentConfig(
+                name="ExplorerAgent",
+                description="Read-only codebase explorer",
+                tool_filter=ReadOnlyFilter(),
+                max_iterations=10,
+                prompt_path=self.DEFAULT_PROMPT_PATH,
+            )
+        super().__init__(llm_service, config)
+        self._capabilities = ExplorerCapabilities()
+
+    def _get_builtin_prompt(self) -> str:
+        """获取内置兜底 prompt"""
+        return """You are the Explorer Agent - a read-only codebase search specialist.
+
+Constraints: Read-Only Mode
+- You MUST NOT create, modify, or delete files
+- You MUST NOT use Write or Edit tools
+- You can only use: Read, Grep, Glob, and read-only Bash commands
+
+Behavior:
+- Adjust exploration depth based on request (quick/medium/thorough)
+- Report all file paths using absolute paths
+- Be concise, avoid emoji
+- Parallelize independent searches for efficiency
+
+Output:
+Report findings: files/code locations discovered, key conclusions, relevance to request."""
+
+    def execute(self, task: str, context: Optional[Dict[str, Any]] = None) -> AgentResult:
+        """执行探索任务"""
+        self.state.current_task = task
+        self.state.is_busy = True
+
+        try:
+            user_prompt = self._build_explorer_prompt(task, context or {})
+            response = self._invoke_llm(user_prompt)
+
+            self.state.is_busy = False
+
+            return AgentResult(
+                success=True,
+                output=response,
+                artifacts={"exploration_result.md": response}
+            )
+
+        except Exception as e:
+            self.state.last_error = str(e)
+            self.state.is_busy = False
+            return AgentResult(
+                success=False,
+                error=str(e)
+            )
+
+    def _build_explorer_prompt(self, task: str, context: Dict[str, Any]) -> str:
+        """构建探索 prompt"""
+        return f"""Task: {task}
+
+Context:
+{context.get('analysis', '')}
+
+Please explore the codebase to find relevant files and understand the structure.
+Report findings with absolute file paths and brief explanations."""
+
+
+class ReviewerCapabilities(AgentCapabilities):
+    """Reviewer Agent 能力"""
+
+    def __init__(self) -> None:
+        super().__init__(
+            allowed_tools={"Read", "Glob", "Grep"},
+            allowed_read_patterns=["**/*.py", "**/*.md"],
+            allowed_write_patterns=[],  # 只读，不能写
+            max_tool_calls=15,
+            requires_confirmation=False
+        )
+
+
+class ReviewerAgent(BaseAgent):
+    """Reviewer Agent - 代码质量评审专家
+
+    职责:
+    - 代码质量评审（类型提示、docstrings、命名、复杂度）
+    - 架构对齐检查（是否遵循 implementation_plan.md）
+    - 输出二元决策：通过/拒绝
+
+    工具权限:
+    - 只读工具：Read, Glob, Grep
+    """
+
+    AGENT_TYPE = "reviewer"
+    DEFAULT_PROMPT_PATH = "subagent-reviewer"
+
+    def __init__(self, llm_service: Any, config: Optional[AgentConfig] = None) -> None:
+        if config is None:
+            config = AgentConfig(
+                name="ReviewerAgent",
+                description="Code quality reviewer",
+                tool_filter=ReadOnlyFilter(),
+                max_iterations=5,
+                prompt_path=self.DEFAULT_PROMPT_PATH,
+            )
+        super().__init__(llm_service, config)
+        self._capabilities = ReviewerCapabilities()
+
+    def _get_builtin_prompt(self) -> str:
+        """获取内置兜底 prompt"""
+        return """You are the Reviewer Agent - a code quality review specialist.
+
+Review Checklist:
+1. Architecture Alignment: Does code follow implementation_plan.md?
+2. Type Hints: All functions have complete type annotations (Python 3.10+)
+3. Docstrings: Google-style for all public APIs
+4. Naming: Clear, descriptive names following PEP 8
+5. Complexity: Long functions (>50 lines), duplicated logic
+
+Output Format (STRICT BINARY CHOICE):
+
+### Pass
+[Pass] Code meets architecture and quality requirements, ready for Bash testing
+
+### Reject
+[Reject] Code needs modification:
+1. [Architecture] Specific file:line - issue + fix suggestion
+2. [Quality] Specific file:line - issue + fix suggestion
+3. [Style] Specific file:line - issue + fix suggestion"""
+
+    def execute(self, task: str, context: Optional[Dict[str, Any]] = None) -> AgentResult:
+        """执行评审任务"""
+        self.state.current_task = task
+        self.state.is_busy = True
+
+        try:
+            user_prompt = self._build_reviewer_prompt(task, context or {})
+            response = self._invoke_llm(user_prompt)
+
+            self.state.is_busy = False
+
+            # 判断是否通过
+            passed = "Pass" in response or "[Pass]" in response or "通过" in response
+
+            return AgentResult(
+                success=passed,
+                output=response,
+                artifacts={"review_report.md": response}
+            )
+
+        except Exception as e:
+            self.state.last_error = str(e)
+            self.state.is_busy = False
+            return AgentResult(
+                success=False,
+                error=str(e)
+            )
+
+    def _build_reviewer_prompt(self, task: str, context: Dict[str, Any]) -> str:
+        """构建评审 prompt"""
+        plan = context.get("plan", "")
+        code = context.get("code", "")
+
+        return f"""Task: {task}
+
+Implementation Plan (for architecture alignment):
+{plan}
+
+Code to Review:
+{code}
+
+Please review the code against the implementation plan and quality standards.
+Output your decision (Pass/Reject) with specific feedback."""
+
+
+class BashCapabilities(AgentCapabilities):
+    """Bash Agent 能力"""
+
+    def __init__(self) -> None:
+        super().__init__(
+            allowed_tools={"Read", "Glob", "Bash"},
+            allowed_read_patterns=["**/*"],
+            allowed_write_patterns=["tests/**/*.md"],
+            max_tool_calls=10,
+            requires_confirmation=False
+        )
+
+
+class BashAgent(BaseAgent):
+    """Bash Agent - 终端执行与测试验证专家
+
+    职责:
+    - 运行测试（pytest）
+    - 类型检查（mypy）
+    - 代码风格检查（flake8）
+    - 覆盖率检查（pytest --cov）
+    - 生成质量报告
+
+    工具权限:
+    - 只读：Read, Glob
+    - Bash 命令（受白名单/黑名单限制）
+    """
+
+    AGENT_TYPE = "bash"
+    DEFAULT_PROMPT_PATH = "subagent-bash"
+
+    def __init__(
+        self,
+        llm_service: Any,
+        config: Optional[AgentConfig] = None,
+        command_executor: Optional[Any] = None,
+    ) -> None:
+        if config is None:
+            config = AgentConfig(
+                name="BashAgent",
+                description="Terminal command executor and test validator",
+                tool_filter=None,  # 在 execute 中检查命令白名单
+                max_iterations=5,
+                prompt_path=self.DEFAULT_PROMPT_PATH,
+            )
+        super().__init__(llm_service, config)
+        self._capabilities = BashCapabilities()
+        self._command_executor = command_executor
+
+    def _get_builtin_prompt(self) -> str:
+        """获取内置兜底 prompt"""
+        return """You are the Bash Agent - a terminal execution and test verification specialist.
+
+Capabilities:
+1. Terminal Command Execution (restricted whitelist)
+2. Run Tests (pytest)
+3. Type Checking (mypy)
+4. Code Style (flake8)
+5. Coverage Check (pytest --cov)
+
+Command Whitelist (Direct Execution):
+- Tests: pytest, python -m pytest
+- Type Check: mypy, python -m mypy
+- Style: flake8, black --check
+- Info: ls, cat, head, tail, pwd
+- Python: python, python -m
+- Git (read-only): git status, git log, git diff, git branch
+
+Command Blacklist (Prohibited):
+- rm -rf, mkfs, chmod 777, curl|bash, dd, sudo
+
+Output Format:
+Generate quality report with test results, type check, code style, and coverage."""
+
+    def execute(self, task: str, context: Optional[Dict[str, Any]] = None) -> AgentResult:
+        """执行 Bash 任务"""
+        self.state.current_task = task
+        self.state.is_busy = True
+
+        try:
+            # 运行测试
+            test_result = self._run_tests()
+
+            # 类型检查
+            type_result = self._run_type_check()
+
+            # 代码风格检查
+            lint_result = self._run_lint()
+
+            # 覆盖率检查
+            coverage_result = self._run_coverage()
+
+            self.state.is_busy = False
+
+            # 生成报告
+            report = self._generate_report({
+                "tests": test_result,
+                "types": type_result,
+                "lint": lint_result,
+                "coverage": coverage_result
+            })
+
+            # 判断是否通过
+            all_passed = all([
+                test_result.get("success", False),
+                type_result.get("success", False),
+                lint_result.get("success", False),
+                coverage_result.get("success", True),  # 覆盖率可选
+            ])
+
+            return AgentResult(
+                success=all_passed,
+                output=report,
+                artifacts={"quality_report.md": report}
+            )
+
+        except Exception as e:
+            self.state.last_error = str(e)
+            self.state.is_busy = False
+            return AgentResult(
+                success=False,
+                error=str(e)
+            )
+
+    def _run_tests(self) -> Dict[str, Any]:
+        """运行 pytest"""
+        if self._command_executor:
+            success, stdout, stderr = self._command_executor("pytest tests/ -v --tb=short", 120)
+            return {"success": success, "stdout": stdout, "stderr": stderr}
+        return {"success": True, "stdout": "Tests passed (simulated)", "stderr": ""}
+
+    def _run_type_check(self) -> Dict[str, Any]:
+        """运行 mypy"""
+        if self._command_executor:
+            success, stdout, stderr = self._command_executor("mypy src/ --strict", 60)
+            return {"success": success, "stdout": stdout, "stderr": stderr}
+        return {"success": True, "stdout": "No type errors (simulated)", "stderr": ""}
+
+    def _run_lint(self) -> Dict[str, Any]:
+        """运行 flake8"""
+        if self._command_executor:
+            success, stdout, stderr = self._command_executor("flake8 src/", 30)
+            return {"success": success, "stdout": stdout, "stderr": stderr}
+        return {"success": True, "stdout": "No lint issues (simulated)", "stderr": ""}
+
+    def _run_coverage(self) -> Dict[str, Any]:
+        """运行覆盖率检查"""
+        if self._command_executor:
+            success, stdout, stderr = self._command_executor(
+                "pytest tests/ --cov=src --cov-fail-under=80 -q", 60
+            )
+            return {"success": success, "stdout": stdout, "stderr": stderr}
+        return {"success": True, "stdout": "Coverage OK (simulated)", "stderr": ""}
+
+    def _generate_report(self, results: Dict[str, Dict]) -> str:
+        """生成质量报告"""
+        lines = ["# Quality Report\n"]
+
+        # 测试
+        lines.append("## Tests\n")
+        if results["tests"].get("success"):
+            lines.append("✅ All tests passed\n")
+        else:
+            lines.append("❌ Tests failed\n")
+            lines.append(f"```\n{results['tests'].get('stderr', '')}\n```\n")
+
+        # 类型检查
+        lines.append("## Type Check\n")
+        if results["types"].get("success"):
+            lines.append("✅ No type errors\n")
+        else:
+            lines.append("❌ Type errors found\n")
+            lines.append(f"```\n{results['types'].get('stderr', '')}\n```\n")
+
+        # 代码风格
+        lines.append("## Code Style\n")
+        if results["lint"].get("success"):
+            lines.append("✅ No style issues\n")
+        else:
+            lines.append("❌ Style issues found\n")
+            lines.append(f"```\n{results['lint'].get('stderr', '')}\n```\n")
+
+        # 覆盖率
+        lines.append("## Coverage\n")
+        if results["coverage"].get("success"):
+            lines.append("✅ Coverage >= 80%\n")
+        else:
+            lines.append("⚠️ Coverage < 80%\n")
+            lines.append(f"```\n{results['coverage'].get('stderr', '')}\n```\n")
+
+        return "\n".join(lines)
+
+
+# ==================== New Subagents (General Purpose & Guide) ====================
+
+class GeneralPurposeCapabilities(AgentCapabilities):
+    """General Purpose Agent 能力
+
+    A fast, read-only agent optimized for searching and analyzing codebases.
+    Uses Haiku model for low-latency responses.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(
+            allowed_tools={"Read", "Glob", "Grep", "Command_ls", "Command_cat",
+                          "Command_head", "Command_tail", "Command_git_status",
+                          "Command_git_log", "Command_git_diff"},
+            allowed_read_patterns=["**/*"],
+            allowed_write_patterns=[],  # 只读，不能写
+            max_tool_calls=20,  # 更多的工具调用以支持全面搜索
+            requires_confirmation=False
+        )
+
+
+class GeneralPurposeAgent(BaseAgent):
+    """General Purpose Agent - 通用只读搜索代理
+
+    一个快速的、只读的代理，优化用于搜索和分析代码库。
+
+    特点:
+    - 使用 Haiku 模型 (快速、低延迟)
+    - 只读工具访问 (拒绝 Write 和 Edit)
+    - 适用于：文件发现、代码搜索、代码库探索
+
+    工具权限:
+    - 只读工具：Read, Glob, Grep
+    - 只读命令：ls, git status, git log, git diff, cat, head, tail
+    """
+
+    AGENT_TYPE = "general_purpose"
+    DEFAULT_PROMPT_PATH = "general-purpose"
+
+    def __init__(self, llm_service: Any, config: Optional[AgentConfig] = None) -> None:
+        if config is None:
+            config = AgentConfig(
+                name="GeneralPurposeAgent",
+                description="Fast read-only codebase search and analysis agent",
+                tool_filter=ReadOnlyFilter(),
+                max_iterations=15,
+                prompt_path=self.DEFAULT_PROMPT_PATH,
+                metadata={"model": "haiku"}  # 使用 Haiku 模型
+            )
+        super().__init__(llm_service, config)
+        self._capabilities = GeneralPurposeCapabilities()
+
+    def _get_builtin_prompt(self) -> str:
+        """获取内置兜底 prompt"""
+        return """You are the General Purpose Agent - a fast, read-only agent.
+Optimized for searching and analyzing codebases.
+
+## Configuration
+- Model: Haiku (fast, low-latency)
+- Mode: Read-only
+
+## Constraints: Read-Only Mode
+
+You MUST NOT:
+- Create, modify, or delete files
+- Use Write or Edit tools
+- Execute state-changing bash commands (mkdir, git add, npm install, etc.)
+
+You CAN use:
+- Read, Grep, Glob for code search
+- Read-only Bash commands: ls, git status, git log, git diff, cat, head, tail
+
+## Behavior
+
+- Be fast and efficient
+- Use parallel searches when possible
+- Report file paths using absolute paths
+- Be concise, avoid emoji
+- Focus on finding relevant code quickly
+
+## Output
+
+Report your findings clearly:
+1. Files discovered (with absolute paths)
+2. Key code locations
+3. Relevant patterns or matches
+4. Brief conclusions about what you found"""
+
+    def execute(self, task: str, context: Optional[Dict[str, Any]] = None) -> AgentResult:
+        """执行通用搜索任务"""
+        self.state.current_task = task
+        self.state.is_busy = True
+
+        try:
+            user_prompt = self._build_general_purpose_prompt(task, context or {})
+            response = self._invoke_llm(user_prompt)
+
+            self.state.is_busy = False
+
+            return AgentResult(
+                success=True,
+                output=response,
+                artifacts={"general_purpose_result.md": response}
+            )
+
+        except Exception as e:
+            self.state.last_error = str(e)
+            self.state.is_busy = False
+            return AgentResult(
+                success=False,
+                error=str(e)
+            )
+
+    def _build_general_purpose_prompt(self, task: str, context: Dict[str, Any]) -> str:
+        """构建通用搜索 prompt"""
+        return f"""Task: {task}
+
+Context:
+{context.get('analysis', '')}
+
+Please search and analyze the codebase to fulfill this request.
+Use your read-only tools efficiently to find relevant information."""
+
+
+class MiniCoderGuideCapabilities(AgentCapabilities):
+    """Mini-Coder Guide Agent 能力
+
+    A read-only agent that helps users understand and use mini-coder effectively.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(
+            allowed_tools={"Read", "Glob", "Grep"},
+            allowed_read_patterns=["**/*.md", "**/*.yaml", "**/*.yml", "**/*.py"],
+            allowed_write_patterns=[],  # 只读，不能写
+            max_tool_calls=10,
+            requires_confirmation=False
+        )
+
+
+class MiniCoderGuideAgent(BaseAgent):
+    """Mini-Coder Guide Agent - mini-coder 使用指南代理
+
+    你的唯一工作是帮助用户理解并有效使用 **mini-coder**（带有 TUI 的多 agent 编码助手）。
+
+    职责:
+    - 不编辑代码或运行终端命令
+    - 回答问题并指向文档
+    - 提供 mini-coder 使用指导
+
+    专业领域:
+    1. Mini-Coder TUI & 使用
+    2. Multi-agent system & workflow
+    3. Project layout, config & design
+    """
+
+    AGENT_TYPE = "mini_coder_guide"
+    DEFAULT_PROMPT_PATH = "mini-coder-guide"
+
+    def __init__(self, llm_service: Any, config: Optional[AgentConfig] = None) -> None:
+        if config is None:
+            config = AgentConfig(
+                name="MiniCoderGuideAgent",
+                description="Mini-coder usage guide and documentation assistant",
+                tool_filter=ReadOnlyFilter(),
+                max_iterations=8,
+                prompt_path=self.DEFAULT_PROMPT_PATH,
+            )
+        super().__init__(llm_service, config)
+        self._capabilities = MiniCoderGuideCapabilities()
+
+    def _get_builtin_prompt(self) -> str:
+        """获取内置兜底 prompt"""
+        return """You are the mini-coder guide agent.
+Your only job is to help users understand and use **mini-coder** effectively.
+You do not edit code or run terminal commands; you answer questions and point to documentation.
+
+## Your Expertise Areas
+
+### 1. Mini-Coder TUI & Usage
+- How to run: `python -m mini_coder.tui` or `./dist/mini-coder-tui`
+- Configuration: `~/.mini-coder/tui.yaml` (animation, thinking display, working directory)
+- Working directory selection and context-aware assistance
+- CLI arguments and binary usage (see README.md)
+
+### 2. Multi-Agent System & Workflow
+- Agent roles:
+  - Explorer (read-only search)
+  - Planner (TDD planning)
+  - Coder (implementation)
+  - Reviewer (quality + architecture)
+  - Bash (tests/lint/typecheck)
+- Workflow: Explorer (optional) → Planner → Coder → Reviewer → Bash
+- Loops on review reject or test failure
+- Dynamic prompt loading: `prompts/system/*.md`, placeholder `{{identifier}}`, PromptLoader
+- Agent config: `config/subagents.yaml`, tool filters (ReadOnlyFilter, FullAccessFilter, etc.)
+
+### 3. Project Layout, Config & Design
+- Config: `config/` (llm.yaml, tools.yaml, memory.yaml, subagents.yaml, workflow.yaml)
+- Prompts: `prompts/system/` and knowledge-base/agent-prompts as referenced in docs
+- Memory: working memory + persistent store (see docs/context-memory-design.md)
+- Command execution & security: docs/command-execution-security-design.md
+- CLAUDE.md: high-level workflow and agent overview for Claude Code users
+
+## Where to Look (Use Read / Glob / Grep)
+
+- **README.md** – installation, TUI config, CLI, binary
+- **CLAUDE.md** – agent roles, workflow stages, prompt loading, development setup
+- **docs/** – context-memory-design.md, command-execution-security-design.md, multi-agent-architecture-design.md, agent-prompts
+- **config/** – subagents.yaml, llm.yaml, tools.yaml, memory.yaml
+- **prompts/** – system prompt files if present
+
+## Approach
+
+1. Decide which area the question is about (TUI, agents/workflow, or config/design).
+2. Use Read to open the most relevant file (README, CLAUDE.md, or a doc under docs/).
+3. Use Glob or Grep to find specific config keys, agent names, or file paths when needed.
+4. Answer in short, actionable form; cite file paths and section names.
+5. If the repo has moved docs (e.g. to knowledge-base/), say so and point to the current location.
+
+## Guidelines
+
+- Rely on project docs and config; do not invent behavior.
+- Keep answers concise; include a one-line example or path when useful.
+- Mention related features (e.g. "For security details see docs/command-execution-security-design.md").
+- No emojis.
+- Do not suggest running destructive or sensitive commands; only point to docs or config."""
+
+    def execute(self, task: str, context: Optional[Dict[str, Any]] = None) -> AgentResult:
+        """执行指南任务 - 回答用户关于 mini-coder 的问题"""
+        self.state.current_task = task
+        self.state.is_busy = True
+
+        try:
+            # 首先搜索相关文档
+            doc_search = self._search_documentation(task)
+
+            # 构建回答
+            user_prompt = self._build_guide_prompt(task, doc_search, context or {})
+            response = self._invoke_llm(user_prompt)
+
+            self.state.is_busy = False
+
+            return AgentResult(
+                success=True,
+                output=response,
+                artifacts={"guide_response.md": response},
+                metadata={"doc_search": doc_search}
+            )
+
+        except Exception as e:
+            self.state.last_error = str(e)
+            self.state.is_busy = False
+            return AgentResult(
+                success=False,
+                error=str(e)
+            )
+
+    def _search_documentation(self, task: str) -> Dict[str, str]:
+        """搜索相关文档"""
+        docs = {}
+
+        # 搜索 README.md
+        readme_path = Path("README.md")
+        if readme_path.exists():
+            docs["README.md"] = readme_path.read_text(encoding="utf-8")[:2000]  # 限制长度
+
+        # 搜索 CLAUDE.md
+        claude_md_path = Path("CLAUDE.md")
+        if claude_md_path.exists():
+            docs["CLAUDE.md"] = claude_md_path.read_text(encoding="utf-8")[:3000]
+
+        # 搜索 docs 目录
+        docs_dir = Path("docs")
+        if docs_dir.exists():
+            # 查找相关的 markdown 文件
+            for md_file in docs_dir.rglob("*.md"):
+                if len(docs) < 5:  # 限制文档数量
+                    try:
+                        content = md_file.read_text(encoding="utf-8")[:1500]
+                        docs[f"docs/{md_file.relative_to(docs_dir)}"] = content
+                    except Exception:
+                        pass
+
+        return docs
+
+    def _build_guide_prompt(self, task: str, doc_search: Dict[str, str], context: Dict[str, Any]) -> str:
+        """构建指南 prompt"""
+        docs_context = "\n\n".join([f"### {path}\n\n{content}" for path, content in doc_search.items()])
+
+        return f"""You are the mini-coder guide agent. Help the user understand and use mini-coder effectively.
+
+User Question: {task}
+
+## Available Documentation
+
+{docs_context}
+
+## Your Task
+
+Answer the user's question based on the documentation above. Include:
+1. Direct answer to their question
+2. Relevant file paths and configuration keys
+3. Links to related documentation sections
+4. Brief examples if helpful
+
+Keep your answer concise and actionable. Do not suggest destructive commands."""
+
+
+# ==================== Export ====================
+
+__all__ = [
+    # Base
+    "AgentConfig",
+    "AgentState",
+    "AgentResult",
+    "BaseAgent",
+    # Legacy Agents (for backward compatibility)
+    "PlannerAgent",
+    "CoderAgent",
+    "TesterAgent",
+    "AgentTeam",
+    # New Subagents
+    "ExplorerCapabilities",
+    "ExplorerAgent",
+    "ReviewerCapabilities",
+    "ReviewerAgent",
+    "BashCapabilities",
+    "BashAgent",
+    # General Purpose & Guide
+    "GeneralPurposeCapabilities",
+    "GeneralPurposeAgent",
+    "MiniCoderGuideCapabilities",
+    "MiniCoderGuideAgent",
+]

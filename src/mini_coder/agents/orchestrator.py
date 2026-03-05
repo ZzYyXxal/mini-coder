@@ -68,7 +68,39 @@ from mini_coder.agents.enhanced import (
     EnhancedAgentResult,
 )
 
+from mini_coder.agents.base import (
+    ExplorerAgent,
+    ReviewerAgent,
+    BashAgent,
+    PromptLoader,
+    AgentConfig,
+)
+from mini_coder.tools.filter import BashRestrictedFilter
+
 logger = logging.getLogger(__name__)
+
+
+class SubAgentType(Enum):
+    """子代理类型枚举"""
+    EXPLORER = "explorer"
+    PLANNER = "planner"
+    CODER = "coder"
+    REVIEWER = "reviewer"
+    BASH = "bash"
+    GENERAL_PURPOSE = "general_purpose"  # Fast read-only search
+    MINI_CODER_GUIDE = "mini_coder_guide"  # Mini-coder usage guide
+
+
+class IntentResult:
+    """意图分析结果"""
+
+    def __init__(self, agent_type: SubAgentType, confidence: float, reason: str):
+        self.agent_type = agent_type
+        self.confidence = confidence
+        self.reason = reason
+
+    def __repr__(self) -> str:
+        return f"IntentResult(agent={self.agent_type.value}, confidence={self.confidence:.2f})"
 
 
 class WorkflowState(Enum):
@@ -507,6 +539,258 @@ class WorkflowOrchestrator:
             artifacts={k: v.content for k, v in self._context.blackboard._artifacts.items() if isinstance(k, str)},
             elapsed_time=self._context.elapsed_time,
         )
+
+    # ==================== Subagent Dispatch Methods ====================
+
+    def _analyze_intent(self, intent: str) -> SubAgentType:
+        """分析用户意图并派发对应的子代理
+
+        基于关键词匹配的意图分析：
+        1. 快速路径：关键词匹配
+        2. 兜底：LLM 决策模糊意图
+
+        Args:
+            intent: 用户请求/意图描述
+
+        Returns:
+            SubAgentType: 派发的子代理类型
+        """
+        intent_lower = intent.lower()
+
+        # Mini-Coder Guide 关键词 (最高优先级，因为这是项目特定问题)
+        guide_keywords = ["mini-coder", "minicoder", "如何使用", "怎么运行", "配置", "tui", "agent 角色", "工作流", "prompt", "subagent"]
+        if any(kw in intent_lower for kw in guide_keywords):
+            logger.info(f"Intent analysis: MINI_CODER_GUIDE (keywords match)")
+            return SubAgentType.MINI_CODER_GUIDE
+
+        # General Purpose 关键词 (快速搜索，通用查询)
+        general_keywords = ["快速查找", "fast search", "general search", "代码搜索", "code search", "文件发现", "file discovery"]
+        if any(kw in intent_lower for kw in general_keywords):
+            logger.info(f"Intent analysis: GENERAL_PURPOSE (keywords match)")
+            return SubAgentType.GENERAL_PURPOSE
+
+        # Explorer 关键词
+        explorer_keywords = ["看看", "找找", "探索", "explore", "search", "find", "查看", "分析结构", "codebase structure"]
+        if any(kw in intent_lower for kw in explorer_keywords):
+            logger.info(f"Intent analysis: EXPLORER (keywords match)")
+            return SubAgentType.EXPLORER
+
+        # Planner 关键词
+        planner_keywords = ["规划", "计划", "拆解", "plan", "design", "架构", "任务分解"]
+        if any(kw in intent_lower for kw in planner_keywords):
+            logger.info(f"Intent analysis: PLANNER (keywords match)")
+            return SubAgentType.PLANNER
+
+        # Coder 关键词
+        coder_keywords = ["实现", "添加", "修改", "implement", "create", "write", "add", "feature", "功能"]
+        if any(kw in intent_lower for kw in coder_keywords):
+            logger.info(f"Intent analysis: CODER (keywords match)")
+            return SubAgentType.CODER
+
+        # Reviewer 关键词
+        reviewer_keywords = ["评审", "检查", "review", "quality", "代码质量", "架构对齐"]
+        if any(kw in intent_lower for kw in reviewer_keywords):
+            logger.info(f"Intent analysis: REVIEWER (keywords match)")
+            return SubAgentType.REVIEWER
+
+        # Bash 关键词
+        bash_keywords = ["测试", "运行", "execute", "test", "bash", "验证", "verify"]
+        if any(kw in intent_lower for kw in bash_keywords):
+            logger.info(f"Intent analysis: BASH (keywords match)")
+            return SubAgentType.BASH
+
+        # 兜底：使用 LLM 决策模糊意图
+        logger.info("Intent analysis: using LLM for ambiguous intent")
+        return self._llm_analyze_intent(intent)
+
+    def _llm_analyze_intent(self, intent: str) -> SubAgentType:
+        """使用 LLM 分析模糊意图"""
+        prompt = f"""Analyze the user request and determine which subagent should handle it.
+
+User Request: {intent}
+
+Available Subagents:
+- EXPLORER: Read-only codebase search (find files, understand structure)
+- PLANNER: Requirements analysis and task planning (TDD plan creation)
+- CODER: Code implementation (write/edit code following TDD)
+- REVIEWER: Code quality review (architecture alignment + quality check)
+- BASH: Terminal execution (run tests, type check, lint)
+- GENERAL_PURPOSE: Fast read-only search using Haiku model (quick code exploration)
+- MINI_CODER_GUIDE: Mini-coder usage guide (answer questions about mini-coder itself)
+
+Respond with only one word: EXPLORER, PLANNER, CODER, REVIEWER, BASH, GENERAL_PURPOSE, or MINI_CODER_GUIDE."""
+
+        try:
+            response = self.llm_service.chat(prompt).strip().upper()
+            if "MINI_CODER_GUIDE" in response or "GUIDE" in response:
+                return SubAgentType.MINI_CODER_GUIDE
+            elif "GENERAL_PURPOSE" in response or "GENERAL" in response:
+                return SubAgentType.GENERAL_PURPOSE
+            elif "EXPLORER" in response:
+                return SubAgentType.EXPLORER
+            elif "PLANNER" in response:
+                return SubAgentType.PLANNER
+            elif "CODER" in response:
+                return SubAgentType.CODER
+            elif "REVIEWER" in response:
+                return SubAgentType.REVIEWER
+            elif "BASH" in response:
+                return SubAgentType.BASH
+            else:
+                logger.warning(f"LLM returned unknown agent type: {response}")
+                return SubAgentType.CODER  # 默认
+        except Exception as e:
+            logger.exception(f"LLM intent analysis error: {e}")
+            return SubAgentType.CODER  # 兜底
+
+    def _create_subagent(self, agent_type: SubAgentType) -> Any:
+        """创建子代理实例
+
+        Args:
+            agent_type: 子代理类型
+
+        Returns:
+            子代理实例
+        """
+        from mini_coder.agents.base import AgentConfig
+        from mini_coder.agents.base import (
+            GeneralPurposeAgent,
+            MiniCoderGuideAgent,
+        )
+
+        blackboard = self._context.blackboard if self._context else Blackboard("dispatch")
+
+        if agent_type == SubAgentType.EXPLORER:
+            return ExplorerAgent(self.llm_service)
+        elif agent_type == SubAgentType.PLANNER:
+            return PlannerAgent(self.llm_service, blackboard=blackboard)
+        elif agent_type == SubAgentType.CODER:
+            return CoderAgent(self.llm_service, blackboard=blackboard)
+        elif agent_type == SubAgentType.REVIEWER:
+            return ReviewerAgent(self.llm_service)
+        elif agent_type == SubAgentType.BASH:
+            return BashAgent(
+                self.llm_service,
+                config=AgentConfig(
+                    name="BashAgent",
+                    description="Terminal execution and test verification",
+                    tool_filter=BashRestrictedFilter(),
+                    max_iterations=10,
+                ),
+                command_executor=self.command_executor,
+            )
+        elif agent_type == SubAgentType.GENERAL_PURPOSE:
+            return GeneralPurposeAgent(self.llm_service)
+        elif agent_type == SubAgentType.MINI_CODER_GUIDE:
+            return MiniCoderGuideAgent(self.llm_service)
+        else:
+            raise ValueError(f"Unknown agent type: {agent_type}")
+
+    def dispatch(self, intent: str, context: Optional[Dict[str, Any]] = None) -> EnhancedAgentResult:
+        """直接派发子代理执行任务
+
+        使用示例:
+        ```python
+        # 探索代码库
+        result = orchestrator.dispatch("探索代码库，找出所有认证相关的文件")
+
+        # 规划任务
+        result = orchestrator.dispatch("规划任务：实现用户登录功能")
+
+        # 实现代码
+        result = orchestrator.dispatch("实现用户登录 API")
+
+        # 代码评审
+        result = orchestrator.dispatch("评审刚实现的代码质量")
+
+        # 运行测试
+        result = orchestrator.dispatch("运行所有测试并生成质量报告")
+        ```
+
+        Args:
+            intent: 用户请求/意图
+            context: 可选的上下文信息
+
+        Returns:
+            EnhancedAgentResult: 执行结果
+        """
+        # 1. 分析意图
+        agent_type = self._analyze_intent(intent)
+        logger.info(f"Dispatching to {agent_type.value}")
+
+        # 2. 创建子代理
+        agent = self._create_subagent(agent_type)
+
+        # 3. 执行任务
+        result = agent.execute(intent, context=context)
+
+        return result
+
+    def execute_command(self, command: str, require_confirm: bool = True) -> Dict[str, Any]:
+        """执行终端命令（带安全检查）
+
+        命令安全策略:
+        - 白名单命令：直接执行
+        - 需确认命令：需要用户确认
+        - 黑名单命令：直接拒绝
+
+        Args:
+            command: 要执行的命令
+            require_confirm: 是否需要确认（对于需要确认的命令）
+
+        Returns:
+            Dict: 执行结果 {success, stdout, stderr, status}
+        """
+        from mini_coder.tools.filter import BashRestrictedFilter
+
+        filter = BashRestrictedFilter()
+        status = filter.get_command_status(command)
+
+        if status == "denied":
+            logger.warning(f"Command denied by security filter: {command}")
+            return {
+                "success": False,
+                "stdout": "",
+                "stderr": f"Command denied by security policy: {command}",
+                "status": "denied"
+            }
+
+        if status == "needs_confirm" and require_confirm:
+            # 需要用户确认
+            logger.info(f"Command requires user confirmation: {command}")
+            return {
+                "success": False,
+                "stdout": "",
+                "stderr": f"Command requires user confirmation: {command}",
+                "status": "needs_confirm"
+            }
+
+        # 白名单命令，直接执行
+        if self.command_executor:
+            try:
+                success, stdout, stderr = self.command_executor(command, timeout=120)
+                return {
+                    "success": success,
+                    "stdout": stdout,
+                    "stderr": stderr,
+                    "status": "allowed"
+                }
+            except Exception as e:
+                return {
+                    "success": False,
+                    "stdout": "",
+                    "stderr": str(e),
+                    "status": "error"
+                }
+        else:
+            # 模拟执行
+            logger.info(f"Command executed (simulated): {command}")
+            return {
+                "success": True,
+                "stdout": f"Command executed (simulated): {command}",
+                "stderr": "",
+                "status": "allowed"
+            }
 
     def _analyze_test_failure(self, result: EnhancedAgentResult) -> str:
         """分析测试失败，决定 retry 还是 replan

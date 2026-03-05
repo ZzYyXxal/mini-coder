@@ -237,3 +237,168 @@ class StrictFilter(ToolFilter):
     def is_allowed(self, tool_name: str) -> bool:
         """检查是否在严格允许列表中"""
         return tool_name in self.allowed_tools
+
+
+class BashRestrictedFilter(ToolFilter):
+    """Bash 命令限制过滤器
+
+    用于 Bash Agent，限制可执行的命令：
+    - 白名单：直接执行
+    - 黑名单：禁止执行
+    - 需确认：需要用户确认
+
+    适用于：
+    - bash（终端执行与测试验证）
+    """
+
+    # 命令白名单（直接执行）
+    WHITELIST: Set[str] = {
+        # 测试
+        "pytest", "python -m pytest",
+        # 类型检查
+        "mypy", "python -m mypy",
+        # 代码风格
+        "flake8", "black --check", "ruff",
+        # 信息查看
+        "ls", "cat", "head", "tail", "pwd", "wc",
+        # Python
+        "python", "python -m",
+        # Git 只读
+        "git status", "git log", "git diff", "git branch", "git show",
+    }
+
+    # 命令黑名单（直接禁止）
+    BLACKLIST: Set[str] = {
+        "rm -rf",
+        "mkfs",
+        "chmod 777",
+        "curl|bash",
+        "dd",
+        "sudo",
+        "Command_sudo",
+        "Command_rm_rf",
+        "Command_dd",
+        "Command_format",
+        "Command_mkfs",
+        "Command_chmod",
+        "Command_chown",
+    }
+
+    # 需要确认的命令
+    REQUIRE_CONFIRM: Set[str] = {
+        "pip install",
+        "pipenv install",
+        "poetry add",
+        "poetry install",
+        "git commit",
+        "git push",
+        "npm install",
+        "npm run build",
+        "make",
+    }
+
+    def __init__(
+        self,
+        whitelist: Optional[Set[str]] = None,
+        blacklist: Optional[Set[str]] = None,
+        require_confirm: Optional[Set[str]] = None
+    ):
+        """初始化 Bash 限制过滤器
+
+        Args:
+            whitelist: 额外允许的命令（添加到默认白名单）
+            blacklist: 额外禁止的命令（添加到默认黑名单）
+            require_confirm: 需要确认的命令（添加到默认列表）
+        """
+        self.whitelist = self.WHITELIST.copy()
+        self.blacklist = self.BLACKLIST.copy()
+        self.require_confirm = self.REQUIRE_CONFIRM.copy()
+
+        if whitelist:
+            self.whitelist.update(whitelist)
+        if blacklist:
+            self.blacklist.update(blacklist)
+        if require_confirm:
+            self.require_confirm.update(require_confirm)
+
+    def is_allowed(self, command: str) -> bool:
+        """检查命令是否允许（在白名单中且不在黑名单中）"""
+        # 黑名单优先
+        if self._matches_blacklist(command):
+            return False
+        # 检查是否在白名单中
+        return self._matches_whitelist(command)
+
+    def needs_confirm(self, command: str) -> bool:
+        """检查命令是否需要用户确认
+
+        Args:
+            command: 命令字符串
+
+        Returns:
+            bool: 是否需要确认
+        """
+        if self._matches_blacklist(command):
+            return False  # 黑名单直接拒绝，不需要确认
+        return self._matches_confirm_list(command)
+
+    def _matches_blacklist(self, command: str) -> bool:
+        """检查是否匹配黑名单"""
+        for pattern in self.blacklist:
+            if pattern in command:
+                return True
+        return False
+
+    def _matches_whitelist(self, command: str) -> bool:
+        """检查是否匹配白名单"""
+        for pattern in self.whitelist:
+            if pattern in command:
+                return True
+        return False
+
+    def _matches_confirm_list(self, command: str) -> bool:
+        """检查是否需要确认"""
+        for pattern in self.require_confirm:
+            if pattern in command:
+                return True
+        return False
+
+    def get_command_status(self, command: str) -> str:
+        """获取命令状态
+
+        Args:
+            command: 命令字符串
+
+        Returns:
+            str: "allowed" / "needs_confirm" / "denied"
+        """
+        if self._matches_blacklist(command):
+            return "denied"
+        if self._matches_confirm_list(command):
+            return "needs_confirm"
+        if self._matches_whitelist(command):
+            return "allowed"
+        return "denied"  # 不在白名单的默认拒绝
+
+
+class PlannerFilter(ReadOnlyFilter):
+    """Planner 专用过滤器
+
+    继承 ReadOnlyFilter，额外允许 WebSearch 和 WebFetch 用于技术调研
+
+    适用于：
+    - planner（需求分析与任务规划）
+    """
+
+    def __init__(self, additional_allowed: Optional[List[str]] = None):
+        """初始化 Planner 过滤器
+
+        Args:
+            additional_allowed: 额外允许的工具名称列表
+        """
+        super().__init__(additional_allowed)
+        # Planner 额外允许 Web 搜索工具
+        self.allowed_tools.update({
+            "WebSearch",
+            "WebFetch",
+        })

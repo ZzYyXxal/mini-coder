@@ -14,6 +14,7 @@ from mini_coder.agents.orchestrator import (
     WorkflowConfig,
     WorkflowContext,
     WorkflowOrchestrator,
+    SubAgentType,
 )
 
 from mini_coder.agents.enhanced import (
@@ -37,17 +38,25 @@ from mini_coder.agents.enhanced import (
     TesterCapabilities,
 )
 
-# base.py 的导出 (向后兼容)
-try:
-    from mini_coder.agents.base import (
-        AgentConfig,
-        AgentState,
-        AgentResult as BaseAgentResult,
-        BaseAgent,
-        AgentTeam,
-    )
-except ImportError:
-    pass
+from mini_coder.agents.base import (
+    AgentConfig,
+    AgentState,
+    AgentResult as BaseAgentResult,
+    BaseAgent,
+    AgentTeam,
+    # New Subagents
+    ExplorerCapabilities,
+    ExplorerAgent,
+    ReviewerCapabilities,
+    ReviewerAgent,
+    BashCapabilities,
+    BashAgent,
+    # General Purpose & Guide
+    GeneralPurposeCapabilities,
+    GeneralPurposeAgent,
+    MiniCoderGuideCapabilities,
+    MiniCoderGuideAgent,
+)
 
 __all__ = [
     # Orchestrator
@@ -56,6 +65,7 @@ __all__ = [
     "WorkflowConfig",
     "WorkflowContext",
     "WorkflowOrchestrator",
+    "SubAgentType",
     # Events
     "EventType",
     "Event",
@@ -74,9 +84,21 @@ __all__ = [
     "PlannerCapabilities",
     "CoderCapabilities",
     "TesterCapabilities",
-    # Base (backward compat)
+    # Base Agents (with Dynamic Prompt Loading)
     "AgentConfig",
     "AgentState",
     "BaseAgent",
     "AgentTeam",
+    # New Subagents
+    "ExplorerCapabilities",
+    "ExplorerAgent",
+    "ReviewerCapabilities",
+    "ReviewerAgent",
+    "BashCapabilities",
+    "BashAgent",
+    # General Purpose & Guide
+    "GeneralPurposeCapabilities",
+    "GeneralPurposeAgent",
+    "MiniCoderGuideCapabilities",
+    "MiniCoderGuideAgent",
 ]

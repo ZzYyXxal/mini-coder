@@ -47,10 +47,10 @@
 
 | 文件 | 用途 |
 |------|------|
-| `docs/agent-prompts/main-agent.md` | 主代理系统提示词（组合用） |
-| `docs/agent-prompts/subagent-explorer.md` | Explorer 子代理系统提示词 |
-| `docs/agent-prompts/subagent-coder.md` | Coder 子代理系统提示词 |
-| `docs/agent-prompts/subagent-fixer.md` | Fixer 子代理系统提示词 |
+| `knowledge-base/mini-coder-agent-prompts/main-agent.md` | 主代理系统提示词（组合用） |
+| `knowledge-base/mini-coder-agent-prompts/subagent-explorer.md` | Explorer 子代理系统提示词 |
+| `knowledge-base/mini-coder-agent-prompts/subagent-coder.md` | Coder 子代理系统提示词 |
+| `knowledge-base/mini-coder-agent-prompts/subagent-fixer.md` | Fixer 子代理系统提示词 |
 
 实现时可将上述内容注入到运行时的 system prompt 或对应子代理配置中（如 YAML frontmatter 的 body 或 `prompt` 字段）。
 
