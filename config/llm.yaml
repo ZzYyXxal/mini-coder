@@ -27,7 +27,7 @@ providers:
   dashscope:
     api_key: "DASHSCOPE_API_KEY"  # 通过环境变量 DASHSCOPE_API_KEY 设置（百炼控制台获取）
     base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
-    model: "qwen3.5-plus"  # 可选: qwen-turbo, qwen-plus, qwen-max, qwen3-max 等
+    model: "glm-5"  # 可选: qwen-turbo, qwen-plus, qwen-max, qwen3-max 等
 
   custom:
     api_key: ""

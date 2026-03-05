@@ -49,6 +49,7 @@ class WorkingMode(Enum):
 class AgentDisplay(Enum):
     """Agent display enumeration for TUI."""
 
+    MAIN = "Main"  # 主 Agent（默认）
     EXPLORER = "Explorer"
     PLANNER = "Planner"
     CODER = "Coder"
@@ -86,7 +87,7 @@ class UIState:
     working_mode: WorkingMode = WorkingMode.PLAN  # Deprecated, kept for compatibility
 
     # Agent display state (new)
-    current_agent: Optional[AgentDisplay] = None
+    current_agent: Optional[AgentDisplay] = AgentDisplay.MAIN  # 默认为主 Agent
     agent_history: List[Dict[str, Any]] = None  # List of {agent, status, timestamp}
     tool_logs: List[Dict[str, Any]] = None  # List of {tool, args, status, duration}
 
@@ -218,8 +219,12 @@ class MiniCoderConsole:
             User input string, or None if user wants to exit.
         """
         try:
+            # Use AgentDisplay if available, otherwise fall back to WorkingMode
             mode_display = Text()
-            mode_display.append(str(self._ui_state.working_mode), style="bold cyan")
+            if self._ui_state.current_agent:
+                mode_display.append(str(self._ui_state.current_agent), style="bold cyan")
+            else:
+                mode_display.append(str(self._ui_state.working_mode), style="bold cyan")
             mode_display.append(" ▶ ", style="default")
 
             buffer = ""
@@ -303,7 +308,10 @@ class MiniCoderConsole:
         """
         try:
             mode_display = Text()
-            mode_display.append(str(self._ui_state.working_mode), style="bold cyan")
+            if self._ui_state.current_agent:
+                mode_display.append(str(self._ui_state.current_agent), style="bold cyan")
+            else:
+                mode_display.append(str(self._ui_state.working_mode), style="bold cyan")
             mode_display.append(" ▶ ", style="default")
             self._console.print(mode_display, end="")
 
@@ -610,7 +618,7 @@ class MiniCoderConsole:
             "  /save     - Save current session\n"
             "  /restore  - Restore latest session\n"
             "  /restore <id> - Restore specific session\n"
-            "  /clear    - 清除对话历史\n"
+            "  /clear    - Clear chat history\n"
             "  /agents   - Show agent history\n"
             "  /tools    - Show recent tool calls\n"
             "  /help     - Show this help",
@@ -694,6 +702,8 @@ class MiniCoderConsole:
                 "timestamp": timestamp,
             })
             self._console.print(f"[dim][{agent_display.value}] 执行{'完成' if status == 'completed' else '失败'}[/dim]")
+            # 恢复为主 Agent 状态
+            self._ui_state.current_agent = AgentDisplay.MAIN
 
     def on_tool_called(
         self,
