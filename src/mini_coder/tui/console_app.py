@@ -179,52 +179,43 @@ class MiniCoderConsole:
     def _display_header(self) -> None:
         """Display the welcome message."""
         self._console.print()
-        header_text = "[bold cyan]mini-coder[/bold cyan]\n\n"
-        header_text += "[dim]AI Coding Assistant[/dim]"
+        header_text = "[bold cyan]mini-coder[/bold cyan] [dim]AI Coding Assistant[/dim]"
 
         # Add working directory if set
         if self._working_directory:
-            header_text += f"\n\n[dim]Work Dir: {self._working_directory}[/dim]"
+            header_text += f"  •  [dim]Work Dir: {self._working_directory}[/dim]"
 
         self._console.print(
             Panel.fit(
                 header_text,
-                title="Welcome",
                 border_style="cyan",
             )
         )
         self._console.print(
-            "[dim]Ready to help you write, debug, and understand code.[/dim]"
-        )
-        self._console.print(
-            "[dim]Press [Tab] to cycle modes: PLAN -> CODE -> EXECUTE[/dim]"
-        )
-        self._console.print(
-            "[dim]Type /help for special commands[/dim]"
+            "[dim]Type /help for available commands[/dim]"
         )
         self._console.print()
 
     def _get_user_input(self) -> str | None:
-        """Get user input with mode indicator.
+        """Get user input with agent indicator.
 
         Uses a custom implementation that provides immediate character echo.
         Handles:
         - Immediate character display
         - Backspace
-        - Enter key (returns empty string, not None)
-        - Tab for mode switching
+        - Enter key
         - Ctrl+C and Ctrl+D for exit
 
         Returns:
             User input string, or None if user wants to exit.
         """
         try:
-            # Use AgentDisplay if available, otherwise fall back to WorkingMode
+            # Display current agent name
             mode_display = Text()
             if self._ui_state.current_agent:
                 mode_display.append(str(self._ui_state.current_agent), style="bold cyan")
             else:
-                mode_display.append(str(self._ui_state.working_mode), style="bold cyan")
+                mode_display.append("Main", style="bold cyan")
             mode_display.append(" ▶ ", style="default")
 
             buffer = ""
@@ -240,8 +231,6 @@ class MiniCoderConsole:
                 try:
                     char = sys.stdin.read(1)
                 except EOFError:
-                    # EOF - break out of the input loop immediately
-                    # Don't call _console.print() here, return directly
                     return buffer.strip() if buffer else ""
 
                 # Handle empty character (EOF in cbreak mode)
@@ -261,17 +250,7 @@ class MiniCoderConsole:
                 # Handle Enter key
                 if char == "\r" or char == "\n":
                     self._console.print()
-                    # Return buffer content (empty string is valid - user just pressed Enter)
                     return buffer.strip()
-
-                # Handle Tab - toggle mode
-                if char == "\t":
-                    self._toggle_working_mode()
-                    # Update mode display
-                    mode_display = Text()
-                    mode_display.append(str(self._ui_state.working_mode), style="bold cyan")
-                    mode_display.append(" ▶ ", style="default")
-                    continue
 
                 # Handle backspace
                 if char and (char == "\x7f" or char == "\b"):
@@ -281,15 +260,12 @@ class MiniCoderConsole:
 
                 # Handle escape sequences (arrow keys)
                 if char and char == "\x1b":
-                    # Read the next two characters
-                    next_char = sys.stdin.read(1)
-                    if next_char == "[":
-                        # Read the third character
-                        arrow_key = sys.stdin.read(1)
-                        # Could handle arrow keys here if needed
+                    sys.stdin.read(1)
+                    if sys.stdin.read(1):
+                        pass  # arrow key - ignored
                     continue
 
-                # Handle printable characters (including space, ASCII 32+)
+                # Handle printable characters
                 if char and ord(char) >= 32:
                     buffer += char
 
@@ -311,7 +287,7 @@ class MiniCoderConsole:
             if self._ui_state.current_agent:
                 mode_display.append(str(self._ui_state.current_agent), style="bold cyan")
             else:
-                mode_display.append(str(self._ui_state.working_mode), style="bold cyan")
+                mode_display.append("Main", style="bold cyan")
             mode_display.append(" ▶ ", style="default")
             self._console.print(mode_display, end="")
 
@@ -488,18 +464,17 @@ class MiniCoderConsole:
 
         if command == "/clear":
             # 先确保 LLM 服务已初始化（首次输入 /clear 时也会初始化再清空会话）
+            import time
+            log_path = Path("/root/LLM/mini-coder/.cursor/debug-f70cb2.log")
             # region agent log
             try:
                 import json
-                import time
-                from pathlib import Path
 
-                log_path = Path("/root/LLM/mini-coder/.cursor/debug-61572a.log")
                 log_entry = {
-                    "sessionId": "61572a",
+                    "sessionId": "f70cb2",
                     "runId": "pre-fix",
-                    "hypothesisId": "H1_H2",
-                    "location": "src/mini_coder/tui/console_app.py:418",
+                    "hypothesisId": "H4",
+                    "location": "src/mini_coder/tui/console_app.py:/clear_enter",
                     "message": "/clear command received",
                     "data": {
                         "raw_input": user_input,
@@ -516,11 +491,39 @@ class MiniCoderConsole:
                 pass
             # endregion
 
-            if self._ensure_llm_service():
-                self._llm_service.clear_history()
-                self._console.print("[dim yellow]对话历史已清除。[/dim]")
-            else:
-                self._console.print("[dim]LLM 未配置，无对话历史可清除。[/dim]")
+            _t0 = int(time.time() * 1000)
+            try:
+                if self._ensure_llm_service():
+                    try:
+                        log_path.parent.mkdir(parents=True, exist_ok=True)
+                        with log_path.open("a", encoding="utf-8") as f:
+                            f.write(json.dumps({"sessionId": "f70cb2", "timestamp": int(time.time() * 1000), "location": "console_app:after_ensure", "message": "after _ensure_llm_service", "data": {"duration_ms": int(time.time() * 1000) - _t0}, "hypothesisId": "H1"}, ensure_ascii=False) + "\n")
+                    except Exception:
+                        pass
+                    _t1 = int(time.time() * 1000)
+                    self._llm_service.clear_history()
+                    try:
+                        with log_path.open("a", encoding="utf-8") as f:
+                            f.write(json.dumps({"sessionId": "f70cb2", "timestamp": int(time.time() * 1000), "location": "console_app:after_clear_history", "message": "after clear_history", "data": {"duration_ms": int(time.time() * 1000) - _t1}, "hypothesisId": "H2"}, ensure_ascii=False) + "\n")
+                    except Exception:
+                        pass
+                    self._console.print("[dim yellow]对话历史已清除。[/dim]")
+                    if getattr(self._console, "file", None):
+                        self._console.file.flush()
+                else:
+                    self._console.print("[dim]LLM 未配置，无对话历史可清除。[/dim]")
+            except Exception as e:
+                logging.warning(f"/clear failed: {e}", exc_info=True)
+                self._console.print(f"[dim yellow]清除对话历史时出错: {e}[/dim yellow]")
+            # region agent log
+            try:
+                _dlog = Path("/root/LLM/mini-coder/.cursor/debug-f70cb2.log")
+                _dlog.parent.mkdir(parents=True, exist_ok=True)
+                with _dlog.open("a", encoding="utf-8") as _df:
+                    _df.write(__import__("json").dumps({"sessionId": "f70cb2", "timestamp": int(__import__("time").time() * 1000), "location": "console_app:/clear_return", "message": "/clear returning True", "data": {}, "hypothesisId": "H5"}, ensure_ascii=False) + "\n")
+            except Exception:
+                pass
+            # endregion
             return True
 
         if command == "/help":
