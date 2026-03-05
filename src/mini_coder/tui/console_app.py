@@ -55,6 +55,7 @@ class AgentDisplay(Enum):
     CODER = "Coder"
     REVIEWER = "Reviewer"
     BASH = "Bash"
+    TESTER = "Tester"  # 测试 Agent
     GENERAL_PURPOSE = "General"
     MINI_CODER_GUIDE = "Guide"
     UNKNOWN = "Unknown"
@@ -68,10 +69,13 @@ class AgentDisplay(Enum):
             "coder": cls.CODER,
             "reviewer": cls.REVIEWER,
             "bash": cls.BASH,
+            "tester": cls.TESTER,
             "general_purpose": cls.GENERAL_PURPOSE,
             "mini_coder_guide": cls.MINI_CODER_GUIDE,
         }
-        return mapping.get(str(agent_type), cls.UNKNOWN)
+        # Get the value from enum if needed
+        agent_value = agent_type.value if hasattr(agent_type, 'value') else str(agent_type)
+        return mapping.get(agent_value, cls.UNKNOWN)
 
     def __str__(self) -> str:
         """Return display name for the agent."""
@@ -602,7 +606,7 @@ class MiniCoderConsole:
                 f"Messages: {msg_count}\n"
                 f"Estimated Tokens: {total_tokens:,}\n"
                 f"Max Tokens: 128,000\n"
-                f"Usage: {total_tokens/128000*100:.1f}%",
+                f"Usage: {total_tokens / 128000 * 100:.1f}%",
                 border_style="green"
             ))
         else:
@@ -730,8 +734,6 @@ class MiniCoderConsole:
             event_type: "started" or "completed"
             result: EnhancedAgentResult (only for completed events)
         """
-        from mini_coder.agents.orchestrator import SubAgentType
-
         agent_display = AgentDisplay.from_agent_type(agent_type)
         timestamp = asyncio.get_event_loop().time() if asyncio.get_event_loop().running() else 0
 
@@ -799,6 +801,7 @@ class MiniCoderConsole:
         """
         self._orchestrator = orchestrator
         orchestrator.register_agent_callback(self.on_agent_event)
+        orchestrator.register_tool_callback(self.on_tool_called)
 
     def _display_agent_status(self) -> None:
         """Display current agent status."""

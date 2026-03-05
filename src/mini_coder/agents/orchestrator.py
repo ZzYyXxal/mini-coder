@@ -84,6 +84,7 @@ class SubAgentType(Enum):
     CODER = "coder"
     REVIEWER = "reviewer"
     BASH = "bash"
+    TESTER = "tester"  # Test execution and quality verification
     GENERAL_PURPOSE = "general_purpose"  # Fast read-only search
     MINI_CODER_GUIDE = "mini_coder_guide"  # Mini-coder usage guide
 
@@ -105,7 +106,7 @@ class WorkflowState(Enum):
     PENDING = "pending"           # 等待开始
     ANALYZING = "analyzing"       # 需求分析中
     PLANNING = "planning"         # 规划中
-    IMPLEMENTING = "implementing" # 实现中
+    IMPLEMENTING = "implementing"  # 实现中
     TESTING = "testing"           # 测试中
     VERIFYING = "verifying"       # 验证中
     COMPLETED = "completed"       # 已完成
@@ -296,6 +297,9 @@ class WorkflowOrchestrator:
         # Agent 回调 (用于 TUI 显示)
         self._agent_callbacks: List[Callable] = []
 
+        # Tool 回调 (用于 TUI 显示)
+        self._tool_callbacks: List[Callable] = []
+
         logger.info(f"WorkflowOrchestrator initialized (max_retries={self.config.max_retries})")
 
     def execute_workflow(self, requirement: str, task_id: Optional[str] = None) -> EnhancedAgentResult:
@@ -349,7 +353,7 @@ class WorkflowOrchestrator:
                         FailureType.AGENT_ERROR,
                         f"Max retries ({self.config.max_retries}) exceeded",
                         needs_user_decision=True,
-                        decision_reason=f"已达到最大重试次数"
+                        decision_reason="已达到最大重试次数"
                     )
 
                 # 执行当前阶段
@@ -363,7 +367,7 @@ class WorkflowOrchestrator:
             return self._create_final_result()
 
         except Exception as e:
-            logger.exception(f"Workflow error")
+            logger.exception("Workflow error")
             return self._fail(FailureType.AGENT_ERROR, str(e))
 
     def _execute_current_stage(self) -> EnhancedAgentResult:
@@ -560,43 +564,43 @@ class WorkflowOrchestrator:
         # Mini-Coder Guide 关键词 (最高优先级，因为这是项目特定问题)
         guide_keywords = ["mini-coder", "minicoder", "如何使用", "怎么运行", "配置", "tui", "agent 角色", "工作流", "prompt", "subagent"]
         if any(kw in intent_lower for kw in guide_keywords):
-            logger.info(f"Intent analysis: MINI_CODER_GUIDE (keywords match)")
+            logger.info("Intent analysis: MINI_CODER_GUIDE (keywords match)")
             return SubAgentType.MINI_CODER_GUIDE
 
         # General Purpose 关键词 (快速搜索，通用查询)
         general_keywords = ["快速查找", "fast search", "general search", "代码搜索", "code search", "文件发现", "file discovery"]
         if any(kw in intent_lower for kw in general_keywords):
-            logger.info(f"Intent analysis: GENERAL_PURPOSE (keywords match)")
+            logger.info("Intent analysis: GENERAL_PURPOSE (keywords match)")
             return SubAgentType.GENERAL_PURPOSE
 
         # Explorer 关键词
         explorer_keywords = ["看看", "找找", "探索", "explore", "search", "find", "查看", "分析结构", "codebase structure"]
         if any(kw in intent_lower for kw in explorer_keywords):
-            logger.info(f"Intent analysis: EXPLORER (keywords match)")
+            logger.info("Intent analysis: EXPLORER (keywords match)")
             return SubAgentType.EXPLORER
 
         # Planner 关键词
         planner_keywords = ["规划", "计划", "拆解", "plan", "design", "架构", "任务分解"]
         if any(kw in intent_lower for kw in planner_keywords):
-            logger.info(f"Intent analysis: PLANNER (keywords match)")
+            logger.info("Intent analysis: PLANNER (keywords match)")
             return SubAgentType.PLANNER
 
         # Coder 关键词
         coder_keywords = ["实现", "添加", "修改", "implement", "create", "write", "add", "feature", "功能"]
         if any(kw in intent_lower for kw in coder_keywords):
-            logger.info(f"Intent analysis: CODER (keywords match)")
+            logger.info("Intent analysis: CODER (keywords match)")
             return SubAgentType.CODER
 
         # Reviewer 关键词
         reviewer_keywords = ["评审", "检查", "review", "quality", "代码质量", "架构对齐"]
         if any(kw in intent_lower for kw in reviewer_keywords):
-            logger.info(f"Intent analysis: REVIEWER (keywords match)")
+            logger.info("Intent analysis: REVIEWER (keywords match)")
             return SubAgentType.REVIEWER
 
         # Bash 关键词
         bash_keywords = ["测试", "运行", "execute", "test", "bash", "验证", "verify"]
         if any(kw in intent_lower for kw in bash_keywords):
-            logger.info(f"Intent analysis: BASH (keywords match)")
+            logger.info("Intent analysis: BASH (keywords match)")
             return SubAgentType.BASH
 
         # 兜底：使用 LLM 决策模糊意图
@@ -660,12 +664,23 @@ Respond with only one word: EXPLORER, PLANNER, CODER, REVIEWER, BASH, GENERAL_PU
 
         blackboard = self._context.blackboard if self._context else Blackboard("dispatch")
 
+        # 创建 Agent 事件回调（用于转发工具调用事件到 TUI）
+        agent_event_callback = self._create_agent_event_callback(agent_type)
+
         if agent_type == SubAgentType.EXPLORER:
             return ExplorerAgent(self.llm_service)
         elif agent_type == SubAgentType.PLANNER:
-            return PlannerAgent(self.llm_service, blackboard=blackboard)
+            return PlannerAgent(
+                self.llm_service,
+                blackboard=blackboard,
+                event_callback=agent_event_callback,
+            )
         elif agent_type == SubAgentType.CODER:
-            return CoderAgent(self.llm_service, blackboard=blackboard)
+            return CoderAgent(
+                self.llm_service,
+                blackboard=blackboard,
+                event_callback=agent_event_callback,
+            )
         elif agent_type == SubAgentType.REVIEWER:
             return ReviewerAgent(self.llm_service)
         elif agent_type == SubAgentType.BASH:
@@ -683,6 +698,12 @@ Respond with only one word: EXPLORER, PLANNER, CODER, REVIEWER, BASH, GENERAL_PU
             return GeneralPurposeAgent(self.llm_service)
         elif agent_type == SubAgentType.MINI_CODER_GUIDE:
             return MiniCoderGuideAgent(self.llm_service)
+        elif agent_type == SubAgentType.TESTER:
+            return TesterAgent(
+                self.llm_service,
+                blackboard=blackboard,
+                event_callback=agent_event_callback,
+            )
         else:
             raise ValueError(f"Unknown agent type: {agent_type}")
 
@@ -915,8 +936,8 @@ Respond with only one word: EXPLORER, PLANNER, CODER, REVIEWER, BASH, GENERAL_PU
         for callback in self._state_callbacks.get(new_state, []):
             try:
                 callback(self._context, new_state)
-            except Exception as e:
-                logger.exception(f"State callback error")
+            except Exception:
+                logger.exception("State callback error")
 
     def register_state_callback(self, state: WorkflowState, callback: Callable) -> None:
         """注册状态回调"""
@@ -930,21 +951,56 @@ Respond with only one word: EXPLORER, PLANNER, CODER, REVIEWER, BASH, GENERAL_PU
         """
         self._agent_callbacks.append(callback)
 
+    def register_tool_callback(self, callback: Callable) -> None:
+        """注册 Tool 事件回调 (用于 TUI 显示)
+
+        Args:
+            callback: 回调函数，签名 (tool_name: str, args: str, status: str, duration: float, result: Optional[str] = None)
+        """
+        self._tool_callbacks.append(callback)
+
+    def _create_agent_event_callback(self, agent_type: SubAgentType) -> Callable[[EventType, Dict], None]:
+        """创建 Agent 事件回调，将事件转换为 TUI 友好的格式
+
+        Args:
+            agent_type: Agent 类型
+
+        Returns:
+            事件回调函数
+        """
+        def callback(event_type: EventType, data: Dict) -> None:
+            # 将 EnhancedAgent 事件转换为 TUI 工具事件
+            if event_type in (EventType.TOOL_STARTING, EventType.TOOL_FAILED, EventType.TOOL_COMPLETED):
+                tool_name = data.get("tool", "unknown")
+                args = data.get("args", "")
+                status = data.get("status", "unknown")
+                duration = data.get("duration", 0.0)
+                result = data.get("result")
+
+                # 调用 tool 回调
+                for tool_callback in self._tool_callbacks:
+                    try:
+                        tool_callback(tool_name, args, status, duration, result)
+                    except Exception:
+                        logger.exception("Tool callback error")
+
+        return callback
+
     def _notify_agent_started(self, agent_type: SubAgentType) -> None:
         """通知 Agent 开始执行"""
         for callback in self._agent_callbacks:
             try:
                 callback(agent_type, "started", None)
-            except Exception as e:
-                logger.exception(f"Agent started callback error")
+            except Exception:
+                logger.exception("Agent started callback error")
 
     def _notify_agent_completed(self, agent_type: SubAgentType, result: EnhancedAgentResult) -> None:
         """通知 Agent 执行完成"""
         for callback in self._agent_callbacks:
             try:
                 callback(agent_type, "completed", result)
-            except Exception as e:
-                logger.exception(f"Agent completed callback error")
+            except Exception:
+                logger.exception("Agent completed callback error")
 
     def get_context(self) -> Optional[WorkflowContext]:
         """获取当前上下文"""

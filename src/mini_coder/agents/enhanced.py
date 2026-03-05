@@ -748,6 +748,7 @@ Constraints:
         """解析评审结果"""
         return response
 
+
 class PlannerCapabilities(AgentCapabilities):
     """Planner Agent 能力"""
 
@@ -783,8 +784,9 @@ class PlannerAgent(BaseEnhancedAgent):
         self,
         llm_service: Any,
         blackboard: Blackboard,
+        event_callback: Optional[Callable[[EventType, Dict], None]] = None,
     ) -> None:
-        super().__init__(llm_service, blackboard, PlannerCapabilities())
+        super().__init__(llm_service, blackboard, PlannerCapabilities(), event_callback=event_callback)
 
     def execute(self, task: str) -> EnhancedAgentResult:
         """执行规划任务"""
@@ -896,8 +898,9 @@ class CoderAgent(BaseEnhancedAgent):
         self,
         llm_service: Any,
         blackboard: Blackboard,
+        event_callback: Optional[Callable[[EventType, Dict], None]] = None,
     ) -> None:
-        super().__init__(llm_service, blackboard, CoderCapabilities())
+        super().__init__(llm_service, blackboard, CoderCapabilities(), event_callback=event_callback)
 
     def execute(self, task: str) -> EnhancedAgentResult:
         """执行编码任务"""
@@ -1047,6 +1050,7 @@ class TesterAgent(BaseEnhancedAgent):
         llm_service: Any,
         blackboard: Blackboard,
         command_executor: Optional[Callable] = None,
+        event_callback: Optional[Callable[[EventType, Dict], None]] = None,
     ) -> None:
         """初始化
 
@@ -1054,8 +1058,9 @@ class TesterAgent(BaseEnhancedAgent):
             llm_service: LLM 服务
             blackboard: 黑板
             command_executor: 命令执行函数 (command, timeout) -> (success, stdout, stderr)
+            event_callback: 可选的事件回调
         """
-        super().__init__(llm_service, blackboard, TesterCapabilities())
+        super().__init__(llm_service, blackboard, TesterCapabilities(), event_callback=event_callback)
         self._command_executor = command_executor
 
     def execute(self, task: str) -> EnhancedAgentResult:
@@ -1170,7 +1175,7 @@ class TesterAgent(BaseEnhancedAgent):
         if tests.get("success"):
             lines.append("✅ All tests passed\n")
         else:
-            lines.append(f"❌ Tests failed\n")
+            lines.append("❌ Tests failed\n")
             lines.append(f"```\n{tests.get('stderr', '')}\n```\n")
 
         # 类型检查
@@ -1178,7 +1183,7 @@ class TesterAgent(BaseEnhancedAgent):
         if types.get("success"):
             lines.append("✅ No type errors\n")
         else:
-            lines.append(f"❌ Type errors found\n")
+            lines.append("❌ Type errors found\n")
             lines.append(f"```\n{types.get('stderr', '')}\n```\n")
 
         # Lint
@@ -1186,7 +1191,7 @@ class TesterAgent(BaseEnhancedAgent):
         if lint.get("success"):
             lines.append("✅ No style issues\n")
         else:
-            lines.append(f"❌ Style issues found\n")
+            lines.append("❌ Style issues found\n")
             lines.append(f"```\n{lint.get('stderr', '')}\n```\n")
 
         # 覆盖率
@@ -1194,7 +1199,7 @@ class TesterAgent(BaseEnhancedAgent):
         if coverage.get("success"):
             lines.append("✅ Coverage >= 80%\n")
         else:
-            lines.append(f"⚠️ Coverage < 80%\n")
+            lines.append("⚠️ Coverage < 80%\n")
             lines.append(f"```\n{coverage.get('stderr', '')}\n```\n")
 
         return "\n".join(lines)
