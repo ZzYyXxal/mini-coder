@@ -12,6 +12,7 @@ import sys
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
+from typing import Any, Dict, List, Optional
 
 from rich.console import Console
 from rich.markdown import Markdown
@@ -34,7 +35,7 @@ class AppState(Enum):
 
 
 class WorkingMode(Enum):
-    """Working mode enumeration."""
+    """Working mode enumeration (deprecated - kept for backwards compatibility)."""
 
     PLAN = "plan"
     CODE = "code"
@@ -45,13 +46,55 @@ class WorkingMode(Enum):
         return self.value.upper()
 
 
+class AgentDisplay(Enum):
+    """Agent display enumeration for TUI."""
+
+    EXPLORER = "Explorer"
+    PLANNER = "Planner"
+    CODER = "Coder"
+    REVIEWER = "Reviewer"
+    BASH = "Bash"
+    GENERAL_PURPOSE = "General"
+    MINI_CODER_GUIDE = "Guide"
+    UNKNOWN = "Unknown"
+
+    @classmethod
+    def from_agent_type(cls, agent_type: Any) -> "AgentDisplay":
+        """Convert SubAgentType to AgentDisplay."""
+        mapping = {
+            "explorer": cls.EXPLORER,
+            "planner": cls.PLANNER,
+            "coder": cls.CODER,
+            "reviewer": cls.REVIEWER,
+            "bash": cls.BASH,
+            "general_purpose": cls.GENERAL_PURPOSE,
+            "mini_coder_guide": cls.MINI_CODER_GUIDE,
+        }
+        return mapping.get(str(agent_type), cls.UNKNOWN)
+
+    def __str__(self) -> str:
+        """Return display name for the agent."""
+        return self.value
+
+
 @dataclass
 class UIState:
     """State of the TUI UI."""
 
     current_screen: str = "welcome"
     thinking_visible: bool = False
-    working_mode: WorkingMode = WorkingMode.PLAN
+    working_mode: WorkingMode = WorkingMode.PLAN  # Deprecated, kept for compatibility
+
+    # Agent display state (new)
+    current_agent: Optional[AgentDisplay] = None
+    agent_history: List[Dict[str, Any]] = None  # List of {agent, status, timestamp}
+    tool_logs: List[Dict[str, Any]] = None  # List of {tool, args, status, duration}
+
+    def __post_init__(self):
+        if self.agent_history is None:
+            self.agent_history = []
+        if self.tool_logs is None:
+            self.tool_logs = []
 
 
 class MiniCoderConsole:
@@ -84,6 +127,9 @@ class MiniCoderConsole:
 
         if directory:
             self._working_directory = Path(directory).resolve()
+
+        # Agent callback support
+        self._orchestrator = None  # Will be set when orchestrator is created
 
         # Set up signal handlers for clean exit
         signal.signal(signal.SIGINT, self._handle_sigint)
@@ -132,10 +178,16 @@ class MiniCoderConsole:
     def _display_header(self) -> None:
         """Display the welcome message."""
         self._console.print()
+        header_text = "[bold cyan]mini-coder[/bold cyan]\n\n"
+        header_text += "[dim]AI Coding Assistant[/dim]"
+
+        # Add working directory if set
+        if self._working_directory:
+            header_text += f"\n\n[dim]Work Dir: {self._working_directory}[/dim]"
+
         self._console.print(
             Panel.fit(
-                "[bold cyan]mini-coder[/bold cyan]\n\n"
-                "[dim]AI Coding Assistant[/dim]",
+                header_text,
                 title="Welcome",
                 border_style="cyan",
             )
@@ -145,6 +197,9 @@ class MiniCoderConsole:
         )
         self._console.print(
             "[dim]Press [Tab] to cycle modes: PLAN -> CODE -> EXECUTE[/dim]"
+        )
+        self._console.print(
+            "[dim]Type /help for special commands[/dim]"
         )
         self._console.print()
 
@@ -464,6 +519,14 @@ class MiniCoderConsole:
             self._show_help()
             return True
 
+        if command == "/agents":
+            self._display_agent_history()
+            return True
+
+        if command == "/tools":
+            self._display_tool_logs()
+            return True
+
         # 未匹配到已知的 slash 命令时，不将其发送给 LLM，直接提示用户
         self._console.print(f"[yellow]未知命令: {command}[/yellow]")
         self._console.print("[dim]输入 /help 查看可用命令列表。[/dim]")
@@ -548,6 +611,8 @@ class MiniCoderConsole:
             "  /restore  - Restore latest session\n"
             "  /restore <id> - Restore specific session\n"
             "  /clear    - 清除对话历史\n"
+            "  /agents   - Show agent history\n"
+            "  /tools    - Show recent tool calls\n"
             "  /help     - Show this help",
             border_style="blue"
         ))
@@ -590,6 +655,125 @@ class MiniCoderConsole:
             f"Mode: [bold green]{self._ui_state.working_mode}[/bold green]",
             justify="right",
         )
+
+    # ==================== Agent Callback Methods ====================
+
+    def on_agent_event(
+        self,
+        agent_type: Any,
+        event_type: str,
+        result: Optional[Any] = None
+    ) -> None:
+        """Agent event callback for TUI display.
+
+        Args:
+            agent_type: The agent type (SubAgentType enum value)
+            event_type: "started" or "completed"
+            result: EnhancedAgentResult (only for completed events)
+        """
+        from mini_coder.agents.orchestrator import SubAgentType
+
+        agent_display = AgentDisplay.from_agent_type(agent_type)
+        timestamp = asyncio.get_event_loop().time() if asyncio.get_event_loop().running() else 0
+
+        if event_type == "started":
+            self._ui_state.current_agent = agent_display
+            self._ui_state.agent_history.append({
+                "agent": agent_display.value,
+                "status": "started",
+                "timestamp": timestamp,
+            })
+            self._console.print()
+            self._console.print(f"[bold cyan][{agent_display.value}] 开始执行...[/bold cyan]")
+
+        elif event_type == "completed":
+            status = "completed" if result and result.success else "failed"
+            self._ui_state.agent_history.append({
+                "agent": agent_display.value,
+                "status": status,
+                "timestamp": timestamp,
+            })
+            self._console.print(f"[dim][{agent_display.value}] 执行{'完成' if status == 'completed' else '失败'}[/dim]")
+
+    def on_tool_called(
+        self,
+        tool_name: str,
+        args: str,
+        status: str = "completed",
+        duration: float = 0.0,
+        result: Optional[str] = None
+    ) -> None:
+        """Tool call callback for TUI display.
+
+        Args:
+            tool_name: Name of the tool
+            args: Tool arguments
+            status: Tool status (starting, completed, failed)
+            duration: Tool execution duration in seconds
+            result: Tool result (optional)
+        """
+        import time
+
+        log_entry = {
+            "tool": tool_name,
+            "args": args,
+            "status": status,
+            "duration": duration,
+            "timestamp": time.time(),
+        }
+        self._ui_state.tool_logs.append(log_entry)
+
+        if status == "starting":
+            self._console.print(f"  ↳ [dim][Tool] {tool_name}: {args}[/dim]")
+        elif status == "completed":
+            self._console.print(f"  ↳ [green][Tool] {tool_name}[/green] [dim]({duration:.2f}s)[/dim]")
+        elif status == "failed":
+            self._console.print(f"  ↳ [red][Tool] {tool_name} (FAILED)[/red]")
+
+    def register_agent_callback(self, orchestrator: Any) -> None:
+        """Register agent callback with orchestrator.
+
+        Args:
+            orchestrator: WorkflowOrchestrator instance
+        """
+        self._orchestrator = orchestrator
+        orchestrator.register_agent_callback(self.on_agent_event)
+
+    def _display_agent_status(self) -> None:
+        """Display current agent status."""
+        if self._ui_state.current_agent:
+            self._console.print(
+                f"[dim]Current Agent: {self._ui_state.current_agent.value}[/dim]",
+                justify="right",
+            )
+
+    def _display_tool_logs(self, limit: int = 10) -> None:
+        """Display recent tool logs.
+
+        Args:
+            limit: Maximum number of tool logs to display
+        """
+        recent_logs = self._ui_state.tool_logs[-limit:]
+        if recent_logs:
+            self._console.print("\n[dim]=== Recent Tool Calls ===[/dim]")
+            for log in recent_logs:
+                status_icon = "✓" if log["status"] == "completed" else "✗" if log["status"] == "failed" else "…"
+                self._console.print(
+                    f"  {status_icon} {log['tool']}: {log['args']} [dim]({log['duration']:.2f}s)[/dim]"
+                )
+
+    def _display_agent_history(self, limit: int = 5) -> None:
+        """Display recent agent history.
+
+        Args:
+            limit: Maximum number of agent history entries to display
+        """
+        recent_history = self._ui_state.agent_history[-limit:]
+        if recent_history:
+            self._console.print("\n[dim]=== Agent History ===[/dim]")
+            for entry in recent_history:
+                status_icon = "✓" if entry["status"] == "completed" else "✗" if entry["status"] == "failed" else "…"
+                self._console.print(f"  {status_icon} {entry['agent']}")
 
     def run(self) -> int:
         """Run the console application.

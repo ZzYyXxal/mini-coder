@@ -56,7 +56,6 @@ import time
 from enum import Enum
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Any, Callable
-from pathlib import Path
 
 from mini_coder.agents.enhanced import (
     Blackboard,
@@ -72,8 +71,6 @@ from mini_coder.agents.base import (
     ExplorerAgent,
     ReviewerAgent,
     BashAgent,
-    PromptLoader,
-    AgentConfig,
 )
 from mini_coder.tools.filter import BashRestrictedFilter
 
@@ -295,6 +292,9 @@ class WorkflowOrchestrator:
         self._state_callbacks: Dict[WorkflowState, List[Callable]] = {
             state: [] for state in WorkflowState
         }
+
+        # Agent 回调 (用于 TUI 显示)
+        self._agent_callbacks: List[Callable] = []
 
         logger.info(f"WorkflowOrchestrator initialized (max_retries={self.config.max_retries})")
 
@@ -718,11 +718,17 @@ Respond with only one word: EXPLORER, PLANNER, CODER, REVIEWER, BASH, GENERAL_PU
         agent_type = self._analyze_intent(intent)
         logger.info(f"Dispatching to {agent_type.value}")
 
-        # 2. 创建子代理
+        # 2. 发送 Agent 开始事件
+        self._notify_agent_started(agent_type)
+
+        # 3. 创建子代理
         agent = self._create_subagent(agent_type)
 
-        # 3. 执行任务
+        # 4. 执行任务
         result = agent.execute(intent, context=context)
+
+        # 5. 发送 Agent 完成事件
+        self._notify_agent_completed(agent_type, result)
 
         return result
 
@@ -915,6 +921,30 @@ Respond with only one word: EXPLORER, PLANNER, CODER, REVIEWER, BASH, GENERAL_PU
     def register_state_callback(self, state: WorkflowState, callback: Callable) -> None:
         """注册状态回调"""
         self._state_callbacks[state].append(callback)
+
+    def register_agent_callback(self, callback: Callable) -> None:
+        """注册 Agent 事件回调 (用于 TUI 显示)
+
+        Args:
+            callback: 回调函数，签名 (agent_type: SubAgentType, event_type: str, result: Optional[EnhancedAgentResult] = None)
+        """
+        self._agent_callbacks.append(callback)
+
+    def _notify_agent_started(self, agent_type: SubAgentType) -> None:
+        """通知 Agent 开始执行"""
+        for callback in self._agent_callbacks:
+            try:
+                callback(agent_type, "started", None)
+            except Exception as e:
+                logger.exception(f"Agent started callback error")
+
+    def _notify_agent_completed(self, agent_type: SubAgentType, result: EnhancedAgentResult) -> None:
+        """通知 Agent 执行完成"""
+        for callback in self._agent_callbacks:
+            try:
+                callback(agent_type, "completed", result)
+            except Exception as e:
+                logger.exception(f"Agent completed callback error")
 
     def get_context(self) -> Optional[WorkflowContext]:
         """获取当前上下文"""

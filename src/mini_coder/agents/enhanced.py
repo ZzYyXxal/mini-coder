@@ -49,11 +49,8 @@ import json
 from enum import Enum
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Any, Callable, Tuple, Set
-from pathlib import Path
+from typing import Dict, List, Optional, Any, Callable, Set
 import hashlib
-
-from mini_coder.tools.filter import ToolFilter, ReadOnlyFilter, FullAccessFilter, StrictFilter
 
 logger = logging.getLogger(__name__)
 
@@ -340,6 +337,7 @@ class BaseEnhancedAgent(ABC):
         llm_service: Any,
         blackboard: Blackboard,
         capabilities: Optional[AgentCapabilities] = None,
+        event_callback: Optional[Callable[[EventType, Dict], None]] = None,
     ) -> None:
         """初始化 Agent
 
@@ -347,10 +345,12 @@ class BaseEnhancedAgent(ABC):
             llm_service: LLM 服务实例
             blackboard: 共享黑板实例
             capabilities: Agent 能力定义
+            event_callback: 可选的事件回调 (event_type, data) -> None
         """
         self.llm_service = llm_service
         self.blackboard = blackboard
         self.capabilities = capabilities or self.DEFAULT_CAPABILITIES.copy()
+        self.event_callback = event_callback
 
         self._state = EnhancedAgentState.IDLE
         self._start_time: Optional[float] = None
@@ -451,6 +451,42 @@ class BaseEnhancedAgent(ABC):
             source=self.AGENT_TYPE
         )
         self.blackboard.log_event(event)
+
+        # 调用外部回调（用于 TUI 显示）
+        if self.event_callback:
+            try:
+                self.event_callback(event_type, data or {})
+            except Exception as e:
+                logger.exception(f"Event callback error: {e}")
+
+    def _emit_tool_event(self, tool_name: str, args: str, status: str, duration: float = 0.0, result: Optional[str] = None) -> None:
+        """发射工具事件
+
+        Args:
+            tool_name: 工具名称
+            args: 工具参数
+            status: 状态 (starting, completed, failed)
+            duration: 执行时长（秒）
+            result: 执行结果
+        """
+        if status == "starting":
+            self._emit_event(EventType.TOOL_STARTING, {
+                "tool": tool_name,
+                "args": args,
+            })
+        elif status == "completed":
+            self._emit_event(EventType.TOOL_COMPLETED, {
+                "tool": tool_name,
+                "args": args,
+                "duration": duration,
+                "result": result,
+            })
+        elif status == "failed":
+            self._emit_event(EventType.TOOL_FAILED, {
+                "tool": tool_name,
+                "args": args,
+                "error": result,
+            })
 
 
 # ==================== Architectural Consultant Agent ====================
