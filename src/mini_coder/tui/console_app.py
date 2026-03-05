@@ -463,67 +463,16 @@ class MiniCoderConsole:
             return True
 
         if command == "/clear":
-            # 先确保 LLM 服务已初始化（首次输入 /clear 时也会初始化再清空会话）
-            import time
-            log_path = Path("/root/LLM/mini-coder/.cursor/debug-f70cb2.log")
-            # region agent log
-            try:
-                import json
-
-                log_entry = {
-                    "sessionId": "f70cb2",
-                    "runId": "pre-fix",
-                    "hypothesisId": "H4",
-                    "location": "src/mini_coder/tui/console_app.py:/clear_enter",
-                    "message": "/clear command received",
-                    "data": {
-                        "raw_input": user_input,
-                        "command": command,
-                        "has_llm_service": hasattr(self, "_llm_service"),
-                        "llm_service_is_none": getattr(self, "_llm_service", None) is None,
-                    },
-                    "timestamp": int(time.time() * 1000),
-                }
-                log_path.parent.mkdir(parents=True, exist_ok=True)
-                with log_path.open("a", encoding="utf-8") as f:
-                    f.write(json.dumps(log_entry, ensure_ascii=False) + "\n")
-            except Exception:
-                pass
-            # endregion
-
-            _t0 = int(time.time() * 1000)
+            # 清空对话历史
             try:
                 if self._ensure_llm_service():
-                    try:
-                        log_path.parent.mkdir(parents=True, exist_ok=True)
-                        with log_path.open("a", encoding="utf-8") as f:
-                            f.write(json.dumps({"sessionId": "f70cb2", "timestamp": int(time.time() * 1000), "location": "console_app:after_ensure", "message": "after _ensure_llm_service", "data": {"duration_ms": int(time.time() * 1000) - _t0}, "hypothesisId": "H1"}, ensure_ascii=False) + "\n")
-                    except Exception:
-                        pass
-                    _t1 = int(time.time() * 1000)
                     self._llm_service.clear_history()
-                    try:
-                        with log_path.open("a", encoding="utf-8") as f:
-                            f.write(json.dumps({"sessionId": "f70cb2", "timestamp": int(time.time() * 1000), "location": "console_app:after_clear_history", "message": "after clear_history", "data": {"duration_ms": int(time.time() * 1000) - _t1}, "hypothesisId": "H2"}, ensure_ascii=False) + "\n")
-                    except Exception:
-                        pass
                     self._console.print("[dim yellow]对话历史已清除。[/dim]")
-                    if getattr(self._console, "file", None):
-                        self._console.file.flush()
                 else:
                     self._console.print("[dim]LLM 未配置，无对话历史可清除。[/dim]")
             except Exception as e:
                 logging.warning(f"/clear failed: {e}", exc_info=True)
-                self._console.print(f"[dim yellow]清除对话历史时出错: {e}[/dim yellow]")
-            # region agent log
-            try:
-                _dlog = Path("/root/LLM/mini-coder/.cursor/debug-f70cb2.log")
-                _dlog.parent.mkdir(parents=True, exist_ok=True)
-                with _dlog.open("a", encoding="utf-8") as _df:
-                    _df.write(__import__("json").dumps({"sessionId": "f70cb2", "timestamp": int(__import__("time").time() * 1000), "location": "console_app:/clear_return", "message": "/clear returning True", "data": {}, "hypothesisId": "H5"}, ensure_ascii=False) + "\n")
-            except Exception:
-                pass
-            # endregion
+                self._console.print(f"[dim yellow]清除对话历史时出错：{e}[/dim yellow]")
             return True
 
         if command == "/help":
@@ -818,11 +767,16 @@ class MiniCoderConsole:
 
             # Main REPL loop
             while True:
-                # Get user input
-                if is_tty:
-                    user_input = self._get_user_input()
-                else:
-                    user_input = self._get_user_input_simple()
+                # Get user input（捕获 I/O 异常，避免 /clear 等操作后下一轮读输入时直接退出）
+                try:
+                    if is_tty:
+                        user_input = self._get_user_input()
+                    else:
+                        user_input = self._get_user_input_simple()
+                except Exception as e:
+                    logging.warning(f"Get input error: {e}", exc_info=True)
+                    self._console.print("[yellow]Input error, please try again.[/yellow]")
+                    user_input = ""
 
                 # Check for exit conditions
                 if user_input is None:
