@@ -280,6 +280,26 @@ class MiniCoderConsole:
         path = Path.cwd() / "config" / "llm.yaml"
         return path if path.is_file() else None
 
+    def _ensure_llm_service(self) -> bool:
+        """确保 LLM 服务已初始化；若尚未初始化则创建并恢复/启动会话。
+
+        Returns:
+            True 表示已有或已成功创建 LLM 服务，False 表示无配置文件无法创建。
+        """
+        from mini_coder.llm.service import LLMService
+
+        llm_config_path = self._get_llm_config_path()
+        if not llm_config_path:
+            return False
+        if not hasattr(self, '_llm_service') or self._llm_service is None:
+            self._llm_service = LLMService(str(llm_config_path))
+            if self._llm_service.memory_enabled:
+                if not self._llm_service.restore_latest_session():
+                    self._llm_service.start_session(
+                        str(self._working_directory) if self._working_directory else None
+                    )
+        return True
+
     # Loop detection constants
     MAX_RESPONSE_LENGTH = 50000  # Maximum characters in a single response
     MAX_REPEATED_PATTERN = 5     # Maximum times a pattern can repeat consecutively
@@ -330,22 +350,10 @@ class MiniCoderConsole:
 
     def _call_llm_stream_and_display(self, user_input: str) -> bool:
         """Run streaming LLM call and display output (sync, optimized)."""
-        from mini_coder.llm.service import LLMService
-
-        llm_config_path = self._get_llm_config_path()
-        if not llm_config_path:
+        if not self._ensure_llm_service():
             logging.warning("LLM config not found (config/llm.yaml); skipping LLM call")
             return False
         try:
-            # 复用 LLMService 实例（避免重复创建客户端）
-            if not hasattr(self, '_llm_service') or self._llm_service is None:
-                self._llm_service = LLMService(str(llm_config_path))
-                # 尝试恢复最近的会话，如果没有则启动新会话
-                if self._llm_service.memory_enabled:
-                    if not self._llm_service.restore_latest_session():
-                        # 没有可恢复的会话，启动新会话
-                        self._llm_service.start_session(str(self._working_directory) if self._working_directory else None)
-
             # 使用同步流式方法（避免 asyncio.run 开销）
             first = True
             full_response = ""
@@ -416,10 +424,40 @@ class MiniCoderConsole:
             return True
 
         if command == "/clear":
-            # 清除对话历史（如果已初始化 LLM 服务则同时清空其历史）
-            if hasattr(self, "_llm_service") and self._llm_service is not None:
+            # 先确保 LLM 服务已初始化（首次输入 /clear 时也会初始化再清空会话）
+            # region agent log
+            try:
+                import json
+                import time
+                from pathlib import Path
+
+                log_path = Path("/root/LLM/mini-coder/.cursor/debug-61572a.log")
+                log_entry = {
+                    "sessionId": "61572a",
+                    "runId": "pre-fix",
+                    "hypothesisId": "H1_H2",
+                    "location": "src/mini_coder/tui/console_app.py:418",
+                    "message": "/clear command received",
+                    "data": {
+                        "raw_input": user_input,
+                        "command": command,
+                        "has_llm_service": hasattr(self, "_llm_service"),
+                        "llm_service_is_none": getattr(self, "_llm_service", None) is None,
+                    },
+                    "timestamp": int(time.time() * 1000),
+                }
+                log_path.parent.mkdir(parents=True, exist_ok=True)
+                with log_path.open("a", encoding="utf-8") as f:
+                    f.write(json.dumps(log_entry, ensure_ascii=False) + "\n")
+            except Exception:
+                pass
+            # endregion
+
+            if self._ensure_llm_service():
                 self._llm_service.clear_history()
-            self._console.print("[dim yellow]对话历史已清除。[/dim]")
+                self._console.print("[dim yellow]对话历史已清除。[/dim]")
+            else:
+                self._console.print("[dim]LLM 未配置，无对话历史可清除。[/dim]")
             return True
 
         if command == "/help":

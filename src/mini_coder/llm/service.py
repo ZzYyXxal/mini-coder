@@ -603,6 +603,33 @@ class LLMService:
 
     def clear_history(self) -> None:
         """清除对话历史。"""
+        # region agent log
+        try:
+            import json
+            import time
+            from pathlib import Path
+
+            log_path = Path("/root/LLM/mini-coder/.cursor/debug-61572a.log")
+            log_entry = {
+                "sessionId": "61572a",
+                "runId": "pre-fix",
+                "hypothesisId": "H3",
+                "location": "src/mini_coder/llm/service.py:604",
+                "message": "LLMService.clear_history called",
+                "data": {
+                    "provider_name": getattr(self, "provider_name", None),
+                    "has_provider": self.provider is not None,
+                    "has_context_manager": getattr(self, "_context_manager", None) is not None,
+                },
+                "timestamp": int(time.time() * 1000),
+            }
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            with log_path.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(log_entry, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
+        # endregion
+
         if self.provider:
             self.provider.clear_history()
         if getattr(self, '_context_manager', None):

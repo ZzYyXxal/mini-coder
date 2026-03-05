@@ -68,12 +68,14 @@ class EventType(Enum):
     WORKFLOW_FAILED = "workflow_failed"
     STATE_CHANGED = "state_changed"
 
-    # Agent 事件
+    # Agent 事件 (TUI 显示用)
+    AGENT_STARTED = "agent_started"      # Agent 开始执行
     AGENT_INVOKED = "agent_invoked"
-    AGENT_COMPLETED = "agent_completed"
+    AGENT_COMPLETED = "agent_completed"  # Agent 执行完成
     AGENT_FAILED = "agent_failed"
 
-    # 工具事件
+    # 工具事件 (TUI 显示用)
+    TOOL_STARTING = "tool_starting"      # 工具开始执行
     TOOL_CALLED = "tool_called"
     TOOL_COMPLETED = "tool_completed"
     TOOL_FAILED = "tool_failed"
