@@ -415,11 +415,21 @@ class MiniCoderConsole:
             self._restore_session(command)
             return True
 
+        if command == "/clear":
+            # 清除对话历史（如果已初始化 LLM 服务则同时清空其历史）
+            if hasattr(self, "_llm_service") and self._llm_service is not None:
+                self._llm_service.clear_history()
+            self._console.print("[dim yellow]对话历史已清除。[/dim]")
+            return True
+
         if command == "/help":
             self._show_help()
             return True
 
-        return False
+        # 未匹配到已知的 slash 命令时，不将其发送给 LLM，直接提示用户
+        self._console.print(f"[yellow]未知命令: {command}[/yellow]")
+        self._console.print("[dim]输入 /help 查看可用命令列表。[/dim]")
+        return True
 
     def _show_memory_status(self) -> None:
         """Display memory status."""
@@ -499,6 +509,7 @@ class MiniCoderConsole:
             "  /save     - Save current session\n"
             "  /restore  - Restore latest session\n"
             "  /restore <id> - Restore specific session\n"
+            "  /clear    - 清除对话历史\n"
             "  /help     - Show this help",
             border_style="blue"
         ))
