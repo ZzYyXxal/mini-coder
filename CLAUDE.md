@@ -290,6 +290,27 @@ When using the multi-agent coding workflow:
 
 ---
 
+## Coding Standards
+
+### Rich Markup Syntax
+
+When using Rich Console for output, composite style tags must be fully closed:
+
+```python
+# Correct - composite styles must match exactly
+console.print("[dim yellow]文本[/dim yellow]")
+console.print("[bold red]警告[/bold red]")
+
+# Wrong - mismatched closing tag causes MarkupError
+console.print("[dim yellow]文本[/dim]")  # Error!
+```
+
+**Rules**:
+- Composite styles: `[style color]文本[/style color]` — must match exactly
+- Single styles: `[bold]文本[/bold]` or `[red]文本[/]` — can use `[/]` shorthand
+
+---
+
 ## Project Status
 
 This repository is currently implementing the mini-coder TUI component. The core coding agent workflow is documented and ready for integration once the TUI is complete.
