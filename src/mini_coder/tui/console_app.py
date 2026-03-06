@@ -132,7 +132,8 @@ class MiniCoderConsole:
             directory: Optional working directory path.
         """
         self.config = config
-        self._console = Console()
+        # Use force_terminal to ensure Rich doesn't interfere with cbreak mode
+        self._console = Console(force_terminal=True)
         self._working_directory: Path | None = None
         self._state = AppState.IDLE
         self._ui_state = UIState()
@@ -249,7 +250,9 @@ class MiniCoderConsole:
                 # Read single character
                 try:
                     char = sys.stdin.read(1)
-                except EOFError:
+                except (EOFError, OSError, IOError):
+                    # Handle EOF or I/O errors (can occur after Rich Console output in cbreak mode)
+                    logging.debug("stdin.read(1) raised exception, returning empty buffer")
                     return buffer.strip() if buffer else ""
 
                 # Handle empty character (EOF in cbreak mode)
@@ -285,9 +288,12 @@ class MiniCoderConsole:
 
                 # Handle escape sequences (arrow keys)
                 if char and char == "\x1b":
-                    sys.stdin.read(1)
-                    if sys.stdin.read(1):
-                        pass  # arrow key - ignored
+                    try:
+                        sys.stdin.read(1)
+                        if sys.stdin.read(1):
+                            pass  # arrow key - ignored
+                    except (EOFError, OSError, IOError):
+                        pass  # Ignore I/O errors when reading escape sequences
                     continue
 
                 # Handle printable characters
@@ -644,10 +650,12 @@ class MiniCoderConsole:
             try:
                 if hasattr(self, "_llm_service") and self._llm_service is not None:
                     self._llm_service.clear_history()
-                    self._console.print("[dim yellow]对话历史已清除。[/dim]")
+                    self._console.print("[dim yellow]对话历史已清除。[/dim yellow]")
                 else:
                     # 未初始化过 LLM 服务则无需创建，直接提示，保证 /clear 瞬时完成
-                    self._console.print("[dim yellow]当前无对话历史。[/dim]")
+                    self._console.print("[dim yellow]当前无对话历史。[/dim yellow]")
+                # Ensure output is flushed before reading next input
+                sys.stdout.flush()
             except Exception as e:
                 logging.warning(f"/clear failed: {e}", exc_info=True)
                 self._console.print(f"[dim yellow]清除对话历史时出错：{e}[/dim yellow]")
