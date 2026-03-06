@@ -453,13 +453,6 @@ class MiniCoderConsole:
         Returns:
             (是否得到有效响应, 本次对话总耗时秒数, 首字/首 token 耗时秒数；未计时时为 None)
         """
-        # #region agent log
-        try:
-            _log = {"id": "tui_llm_entry", "timestamp": int(time.time() * 1000), "location": "console_app._call_llm_stream_and_display", "message": "request_handled_by", "data": {"handler": "llm_stream_only", "user_input_len": len(user_input)}, "hypothesisId": "H1"}
-            open("/root/LLM/mini-coder/.cursor/debug-2df2a3.log", "a", encoding="utf-8").write(__import__("json").dumps(_log, ensure_ascii=False) + "\n")
-        except Exception:
-            pass
-        # #endregion
         if not self._ensure_llm_service():
             logging.warning("LLM config not found (config/llm.yaml); skipping LLM call")
             return (False, None, None)
@@ -805,14 +798,6 @@ class MiniCoderConsole:
             event_type: "started" or "completed"
             result: EnhancedAgentResult (only for completed events)
         """
-        # #region agent log
-        try:
-            _at = getattr(agent_type, "value", str(agent_type))
-            _log = {"id": "tui_agent_event", "timestamp": int(time.time() * 1000), "location": "console_app.on_agent_event", "message": "agent_event_fired", "data": {"agent_type": _at, "event_type": event_type}, "hypothesisId": "H2"}
-            open("/root/LLM/mini-coder/.cursor/debug-2df2a3.log", "a", encoding="utf-8").write(__import__("json").dumps(_log, ensure_ascii=False) + "\n")
-        except Exception:
-            pass
-        # #endregion
         agent_display = AgentDisplay.from_agent_type(agent_type)
         timestamp = asyncio.get_event_loop().time() if asyncio.get_event_loop().running() else 0
 
@@ -995,14 +980,6 @@ class MiniCoderConsole:
                 # Process the input
                 self.set_state(AppState.RUNNING)
                 logging.info(f"Processing user input: {user_input[:50]}...")
-
-                # #region agent log
-                try:
-                    _log = {"id": "tui_run_loop", "timestamp": int(time.time() * 1000), "location": "console_app.run", "message": "request_path", "data": {"path": "llm_direct", "orchestrator_set": self._orchestrator is not None, "user_input_len": len(user_input)}, "hypothesisId": "H1"}
-                    open("/root/LLM/mini-coder/.cursor/debug-2df2a3.log", "a", encoding="utf-8").write(__import__("json").dumps(_log, ensure_ascii=False) + "\n")
-                except Exception:
-                    pass
-                # #endregion
 
                 # Show thinking status, then newline so streamed response appears below
                 self._display_thinking("Processing your request...")
