@@ -106,6 +106,40 @@ The `WorkflowOrchestrator` provides:
 - `_analyze_intent()`: Keyword-based intent analysis (Chinese and English)
 - `_create_subagent()`: Factory method for agent instantiation
 - `dispatch()`: Direct subagent invocation
+- `dispatch_async()`: Async single task dispatch with ParallelScheduler
+- `dispatch_parallel_async()`: Async parallel dispatch for multiple tasks
+
+### Parallel Execution (New)
+
+The system supports both Agent-level and Tool-level parallel execution:
+
+**Agent-Level Parallelism**:
+- Multiple agents execute concurrently (max 3)
+- Controlled by `asyncio.Semaphore`
+- Supports partial success (continue on failure)
+- Fail-fast strategy available for critical workflows
+
+**Tool-Level Parallelism**:
+- Multiple tool calls execute concurrently within an agent
+- DAG dependency support (tools can depend on other tools' outputs)
+- Placeholder syntax: `{{call_id.output.field}}`
+
+```python
+# Example: Parallel agent dispatch
+result = await orchestrator.dispatch_parallel_async([
+    "探索代码库结构",
+    "规划模块设计",
+    "实现核心功能",
+])
+
+# Example: Tool DAG execution
+tool_calls = [
+    ToolCall(call_id="1", tool_name="Read", arguments={"path": "config.yaml"}),
+    ToolCall(call_id="2", tool_name="Read", arguments={"path": "{{1.output.main}}"}, depends_on=["1"]),
+]
+```
+
+**Architecture**: See `docs/agent-mailbox-schema.md` for detailed design.
 
 ### Tool Security
 

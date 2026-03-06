@@ -15,6 +15,12 @@
 │  │                             ↓                   │    │
 │  │                        VERIFYING → COMPLETED    │    │
 │  └─────────────────────────────────────────────────┘    │
+│  ┌─────────────────────────────────────────────────┐    │
+│  │           ParallelScheduler                      │    │
+│  │  - Agent 级并行 (max 3)                          │    │
+│  │  - Tool 级并行 (max 3)                           │    │
+│  │  - asyncio.Semaphore 并发控制                    │    │
+│  └─────────────────────────────────────────────────┘    │
 └─────────────────────────────────────────────────────────┘
                           │
                           ▼
@@ -51,6 +57,7 @@
 ```
 """
 
+import asyncio
 import logging
 import time
 from enum import Enum
@@ -61,6 +68,7 @@ from mini_coder.agents.enhanced import (
     Blackboard,
     Event,
     EventType,
+    BaseEnhancedAgent,
     PlannerAgent,
     CoderAgent,
     TesterAgent,
@@ -72,6 +80,18 @@ from mini_coder.agents.base import (
     ReviewerAgent,
     BashAgent,
 )
+
+from mini_coder.agents.mailbox import (
+    TaskBrief,
+    SubagentResult,
+    ParallelTaskGroup,
+    ParallelResultGroup,
+    FAIL_STRATEGY_CONTINUE,
+    DEFAULT_MAX_CONCURRENCY,
+    DEFAULT_AGENT_TIMEOUT,
+)
+
+from mini_coder.agents.scheduler import ParallelScheduler
 from mini_coder.tools.filter import BashRestrictedFilter
 
 logger = logging.getLogger(__name__)
@@ -136,6 +156,9 @@ class WorkflowConfig:
     loop_detection_enabled: bool = True
     auto_retry: bool = True
     verbose: bool = False
+    # 并行调度配置
+    max_agent_concurrency: int = DEFAULT_MAX_CONCURRENCY
+    max_tool_concurrency: int = DEFAULT_MAX_CONCURRENCY
 
 
 @dataclass
@@ -289,6 +312,13 @@ class WorkflowOrchestrator:
         # 当前上下文
         self._context: Optional[WorkflowContext] = None
 
+        # 并行调度器
+        self._scheduler = ParallelScheduler(
+            max_agent_concurrency=self.config.max_agent_concurrency,
+            max_tool_concurrency=self.config.max_tool_concurrency,
+            default_agent_timeout=self.config.timeout_seconds,
+        )
+
         # 状态回调
         self._state_callbacks: Dict[WorkflowState, List[Callable]] = {
             state: [] for state in WorkflowState
@@ -317,12 +347,22 @@ class WorkflowOrchestrator:
         import uuid
         task_id = task_id or str(uuid.uuid4())
 
-        # 创建上下文
-        self._context = WorkflowContext(
-            task_id=task_id,
-            requirement=requirement,
-            config=self.config
-        )
+        # 创建/复用上下文：若已有上下文且 task_id 相同，则复用 Blackboard 以便在交互式场景下跨轮共享工件
+        if self._context is not None and self._context.task_id == task_id:
+            self._context.requirement = requirement
+            self._context.blackboard.set_context("requirement", requirement)
+            self._context.current_state = WorkflowState.PENDING
+            self._context.retry_count = 0
+            self._context.start_time = time.time()
+            self._context.error_history.clear()
+            self._context.error_counts.clear()
+            self._context.decision_history.clear()
+        else:
+            self._context = WorkflowContext(
+                task_id=task_id,
+                requirement=requirement,
+                config=self.config
+            )
 
         self._notify_state_change(WorkflowState.PENDING)
         logger.info(f"Starting workflow [{task_id[:8]}]: {requirement[:80]}...")
@@ -369,6 +409,20 @@ class WorkflowOrchestrator:
         except Exception as e:
             logger.exception("Workflow error")
             return self._fail(FailureType.AGENT_ERROR, str(e))
+
+    def ensure_interactive_context(self, task_id: str, requirement_seed: str = "interactive") -> None:
+        """确保存在可复用的交互式上下文（用于 TUI 跨轮共享 Blackboard）。
+
+        TUI 的 dispatch 路径默认不创建 WorkflowContext，会导致每轮新建 Blackboard；
+        该方法用于在交互式会话中创建一个长期存活的 WorkflowContext，从而复用同一个 Blackboard。
+        """
+        if self._context is not None and self._context.task_id == task_id:
+            return
+        self._context = WorkflowContext(
+            task_id=task_id,
+            requirement=requirement_seed,
+            config=self.config,
+        )
 
     def _execute_current_stage(self) -> EnhancedAgentResult:
         """执行当前阶段"""
@@ -551,7 +605,8 @@ class WorkflowOrchestrator:
 
         基于关键词匹配的意图分析：
         1. 快速路径：关键词匹配
-        2. 兜底：LLM 决策模糊意图
+        2. 简单问候语：直接使用 GENERAL_PURPOSE
+        3. 兜底：LLM 决策模糊意图（如果 LLM 不可用则默认 CODER）
 
         Args:
             intent: 用户请求/意图描述
@@ -559,7 +614,17 @@ class WorkflowOrchestrator:
         Returns:
             SubAgentType: 派发的子代理类型
         """
-        intent_lower = intent.lower()
+        intent_lower = intent.lower().strip()
+
+        # 快速路径：简单问候语（不触发 LLM 调用）
+        simple_greetings = [
+            "你好", "您好", "hi", "hello", "hey", "嗨", "哈喽",
+            "早上好", "下午好", "晚上好", "good morning", "good afternoon",
+            "怎么样", "如何", "help", "帮助", "?", "？",
+        ]
+        if intent_lower in simple_greetings or len(intent_lower) <= 3:
+            logger.info("Intent analysis: GENERAL_PURPOSE (simple greeting or short input)")
+            return SubAgentType.GENERAL_PURPOSE
 
         # Mini-Coder Guide 关键词 (最高优先级，因为这是项目特定问题)
         guide_keywords = ["mini-coder", "minicoder", "如何使用", "怎么运行", "配置", "tui", "agent 角色", "工作流", "prompt", "subagent"]
@@ -608,7 +673,15 @@ class WorkflowOrchestrator:
         return self._llm_analyze_intent(intent)
 
     def _llm_analyze_intent(self, intent: str) -> SubAgentType:
-        """使用 LLM 分析模糊意图"""
+        """使用 LLM 分析模糊意图
+
+        如果 LLM 服务不可用或调用失败，返回默认的 GENERAL_PURPOSE。
+        """
+        # 安全检查：LLM 服务是否可用
+        if self.llm_service is None:
+            logger.warning("LLM service not available, defaulting to GENERAL_PURPOSE")
+            return SubAgentType.GENERAL_PURPOSE
+
         prompt = f"""Analyze the user request and determine which subagent should handle it.
 
 User Request: {intent}
@@ -625,7 +698,15 @@ Available Subagents:
 Respond with only one word: EXPLORER, PLANNER, CODER, REVIEWER, BASH, GENERAL_PURPOSE, or MINI_CODER_GUIDE."""
 
         try:
-            response = self.llm_service.chat(prompt).strip().upper()
+            logger.debug(f"Calling LLM for intent analysis: {intent[:50]}...")
+            response = self.llm_service.chat(prompt)
+            if not response:
+                logger.warning("LLM returned empty response, defaulting to GENERAL_PURPOSE")
+                return SubAgentType.GENERAL_PURPOSE
+
+            response = response.strip().upper()
+            logger.debug(f"LLM intent analysis response: {response}")
+
             if "MINI_CODER_GUIDE" in response or "GUIDE" in response:
                 return SubAgentType.MINI_CODER_GUIDE
             elif "GENERAL_PURPOSE" in response or "GENERAL" in response:
@@ -641,11 +722,11 @@ Respond with only one word: EXPLORER, PLANNER, CODER, REVIEWER, BASH, GENERAL_PU
             elif "BASH" in response:
                 return SubAgentType.BASH
             else:
-                logger.warning(f"LLM returned unknown agent type: {response}")
-                return SubAgentType.CODER  # 默认
+                logger.warning(f"LLM returned unknown agent type: {response}, defaulting to GENERAL_PURPOSE")
+                return SubAgentType.GENERAL_PURPOSE
         except Exception as e:
-            logger.exception(f"LLM intent analysis error: {e}")
-            return SubAgentType.CODER  # 兜底
+            logger.error(f"LLM intent analysis error: {e}", exc_info=True)
+            return SubAgentType.GENERAL_PURPOSE  # 兜底
 
     def _create_subagent(self, agent_type: SubAgentType) -> Any:
         """创建子代理实例
@@ -739,6 +820,12 @@ Respond with only one word: EXPLORER, PLANNER, CODER, REVIEWER, BASH, GENERAL_PU
         agent_type = self._analyze_intent(intent)
         logger.info(f"Dispatching to {agent_type.value}")
 
+        # 记录交互式上下文（若存在），便于子代理共享
+        if self._context is not None:
+            self._context.blackboard.set_context("last_user_input", intent)
+            if context is not None:
+                self._context.blackboard.set_context("last_dispatch_context", context)
+
         # 2. 发送 Agent 开始事件
         self._notify_agent_started(agent_type)
 
@@ -746,12 +833,181 @@ Respond with only one word: EXPLORER, PLANNER, CODER, REVIEWER, BASH, GENERAL_PU
         agent = self._create_subagent(agent_type)
 
         # 4. 执行任务
-        result = agent.execute(intent, context=context)
+        if isinstance(agent, BaseEnhancedAgent):
+            # Enhanced 系子代理 execute(task) 不接受 context 参数
+            result = agent.execute(intent)
+        else:
+            result = agent.execute(intent, context=context)
 
         # 5. 发送 Agent 完成事件
         self._notify_agent_completed(agent_type, result)
 
         return result
+
+    def dispatch_with_agent(
+        self,
+        agent_type: SubAgentType,
+        intent: str,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> EnhancedAgentResult:
+        """按指定子代理类型执行一次派发（用于结构化路由）。
+
+        与 dispatch() 相同，但跳过 _analyze_intent，直接使用传入的 agent_type。
+        """
+        logger.info(f"Dispatching to {agent_type.value} (forced)")
+        if self._context is not None:
+            self._context.blackboard.set_context("last_user_input", intent)
+            if context is not None:
+                self._context.blackboard.set_context("last_dispatch_context", context)
+        self._notify_agent_started(agent_type)
+        agent = self._create_subagent(agent_type)
+        if isinstance(agent, BaseEnhancedAgent):
+            result = agent.execute(intent)
+        else:
+            result = agent.execute(intent, context=context)
+        self._notify_agent_completed(agent_type, result)
+        return result
+
+    # ==================== Async Dispatch Methods ====================
+
+    async def dispatch_async(
+        self,
+        intent: str,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> EnhancedAgentResult:
+        """异步派发子代理执行任务。
+
+        使用 ParallelScheduler 进行调度，支持并发控制。
+
+        Args:
+            intent: 用户请求/意图
+            context: 可选的上下文信息
+
+        Returns:
+            EnhancedAgentResult: 执行结果
+        """
+        agent_type = self._analyze_intent(intent)
+        logger.info(f"Async dispatching to {agent_type.value}")
+
+        # 记录交互式上下文
+        if self._context is not None:
+            self._context.blackboard.set_context("last_user_input", intent)
+            if context is not None:
+                self._context.blackboard.set_context("last_dispatch_context", context)
+
+        # 创建 TaskBrief
+        import uuid
+        task_brief = TaskBrief(
+            task_id=str(uuid.uuid4()),
+            intent=intent,
+            context_refs=[],
+            extra=context or {},
+        )
+
+        # 发送 Agent 开始事件
+        self._notify_agent_started(agent_type)
+
+        # 创建 Agent 工厂函数
+        def agent_factory(agent_type_str: str) -> Any:
+            return self._create_subagent(SubAgentType(agent_type_str))
+
+        # 使用调度器执行
+        subagent_result = await self._scheduler.schedule_agent_single(
+            task_brief,
+            lambda at: self._create_subagent(SubAgentType(at)),
+            timeout=self.config.timeout_seconds,
+        )
+
+        # 转换为 EnhancedAgentResult
+        result = EnhancedAgentResult(
+            success=subagent_result.success,
+            output=subagent_result.summary,
+            error=subagent_result.error,
+            elapsed_time=subagent_result.metrics.get("elapsed_time", 0) if subagent_result.metrics else 0,
+        )
+
+        # 发送 Agent 完成事件
+        self._notify_agent_completed(agent_type, result)
+
+        return result
+
+    async def dispatch_parallel_async(
+        self,
+        intents: List[str],
+        context: Optional[Dict[str, Any]] = None,
+        fail_strategy: str = FAIL_STRATEGY_CONTINUE,
+    ) -> ParallelResultGroup:
+        """异步并行派发多个子代理任务。
+
+        使用 ParallelScheduler 进行并行调度，支持并发控制。
+
+        Args:
+            intents: 用户请求/意图列表
+            context: 可选的共享上下文信息
+            fail_strategy: 失败策略 ("continue" 或 "fail_fast")
+
+        Returns:
+            ParallelResultGroup: 并行执行结果
+        """
+        import uuid
+        logger.info(f"Parallel dispatching {len(intents)} tasks")
+
+        # 创建任务组
+        tasks = []
+        for i, intent in enumerate(intents):
+            tasks.append(TaskBrief(
+                task_id=f"task_{i}_{uuid.uuid4().hex[:8]}",
+                intent=intent,
+                context_refs=[],
+                extra=context or {},
+            ))
+
+        group = ParallelTaskGroup(
+            group_id=f"group_{uuid.uuid4().hex[:8]}",
+            tasks=tasks,
+            max_concurrency=self.config.max_agent_concurrency,
+            timeout_per_task=self.config.timeout_seconds,
+            fail_strategy=fail_strategy,
+        )
+
+        # 记录交互式上下文
+        if self._context is not None:
+            self._context.blackboard.set_context("last_parallel_intents", intents)
+
+        # 使用调度器执行
+        result_group = await self._scheduler.schedule_agent_batch(
+            group,
+            lambda at: self._create_subagent(SubAgentType(at)),
+        )
+
+        logger.info(
+            f"Parallel dispatch completed: "
+            f"success={result_group.success_count}, "
+            f"failure={result_group.failure_count}, "
+            f"elapsed={result_group.elapsed_time:.2f}s"
+        )
+
+        return result_group
+
+    def get_scheduler_status(self) -> Dict[str, Any]:
+        """获取调度器状态。"""
+        status = self._scheduler.get_status()
+        return {
+            "running_agents": status.running_agents,
+            "running_tools": status.running_tools,
+            "waiting_agents": status.waiting_agents,
+            "waiting_tools": status.waiting_tools,
+            "max_agent_concurrency": status.max_agent_concurrency,
+            "max_tool_concurrency": status.max_tool_concurrency,
+        }
+
+    def cancel_all_tasks(self) -> int:
+        """取消所有运行中的任务。
+
+        Returns:
+            int: 取消的任务数量
+        """
+        return self._scheduler.cancel_all()
 
     def execute_command(self, command: str, require_confirm: bool = True) -> Dict[str, Any]:
         """执行终端命令（带安全检查）

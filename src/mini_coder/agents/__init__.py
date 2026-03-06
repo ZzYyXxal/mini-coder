@@ -38,6 +38,41 @@ from mini_coder.agents.enhanced import (
     TesterCapabilities,
 )
 
+from mini_coder.agents.mailbox import (
+    TaskBrief,
+    SubagentResult,
+    MailboxMessage,
+    AGENT_MAIN,
+    MESSAGE_TYPE_TASK,
+    MESSAGE_TYPE_RESULT,
+    MESSAGE_TYPE_BATCH_TASK,
+    MESSAGE_TYPE_BATCH_RESULT,
+    # Parallel Schemas
+    ParallelTaskGroup,
+    ParallelResultGroup,
+    ToolCall,
+    ToolCallResult,
+    ToolBatchRequest,
+    ToolBatchResult,
+    # Constants
+    FAIL_STRATEGY_CONTINUE,
+    FAIL_STRATEGY_FAIL_FAST,
+    DEFAULT_MAX_CONCURRENCY,
+    DEFAULT_AGENT_TIMEOUT,
+    DEFAULT_TOOL_TIMEOUT,
+)
+
+from mini_coder.agents.scheduler import (
+    ParallelScheduler,
+    SchedulerStatus,
+)
+
+from mini_coder.agents.tool_scheduler import (
+    ToolScheduler,
+    DependencyGraph,
+    ToolExecutionBatch,
+)
+
 from mini_coder.agents.base import (
     AgentConfig,
     AgentState,
@@ -72,6 +107,35 @@ __all__ = [
     # Blackboard
     "Blackboard",
     "BlackboardArtifact",
+    # Mailbox（主/子 Agent 定向消息与结构化回传）
+    "TaskBrief",
+    "SubagentResult",
+    "MailboxMessage",
+    "AGENT_MAIN",
+    "MESSAGE_TYPE_TASK",
+    "MESSAGE_TYPE_RESULT",
+    "MESSAGE_TYPE_BATCH_TASK",
+    "MESSAGE_TYPE_BATCH_RESULT",
+    # Parallel Schemas
+    "ParallelTaskGroup",
+    "ParallelResultGroup",
+    "ToolCall",
+    "ToolCallResult",
+    "ToolBatchRequest",
+    "ToolBatchResult",
+    # Constants
+    "FAIL_STRATEGY_CONTINUE",
+    "FAIL_STRATEGY_FAIL_FAST",
+    "DEFAULT_MAX_CONCURRENCY",
+    "DEFAULT_AGENT_TIMEOUT",
+    "DEFAULT_TOOL_TIMEOUT",
+    # Scheduler
+    "ParallelScheduler",
+    "SchedulerStatus",
+    # Tool Scheduler
+    "ToolScheduler",
+    "DependencyGraph",
+    "ToolExecutionBatch",
     # Agent Base (Enhanced)
     "AgentCapabilities",
     "EnhancedAgentState",

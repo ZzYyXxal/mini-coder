@@ -5,6 +5,7 @@
 2. 共享黑板（Blackboard）模式进行上下文管理
 3. 明确的工具边界和权限控制
 4. 智能失败恢复和升级策略
+5. 支持异步执行和并行 Tool 调用
 
 核心架构:
 ```
@@ -43,6 +44,7 @@
 ```
 """
 
+import asyncio
 import logging
 import time
 import json
@@ -51,6 +53,14 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Any, Callable, Set
 import hashlib
+
+from mini_coder.agents.mailbox import (
+    MailboxMessage,
+    SubagentResult,
+    TaskBrief,
+    MESSAGE_TYPE_TASK,
+    MESSAGE_TYPE_RESULT,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -134,6 +144,50 @@ class Blackboard:
         self._subscribers: Dict[EventType, List[Callable]] = {
             event: [] for event in EventType
         }
+        # Mailbox：定向消息，主/子 Agent 只共享关键信息（见 docs/agent-mailbox-schema.md）
+        self._mailbox: List[MailboxMessage] = []
+
+    # --- Mailbox（定向投递，结构化回传）---
+
+    def post_message(self, msg: MailboxMessage) -> str:
+        """投递一条消息到 mailbox；返回 message_id。"""
+        self._mailbox.append(msg)
+        logger.debug("Mailbox post: %s -> %s type=%s", msg.from_agent, msg.to_agent, msg.type)
+        return msg.message_id
+
+    def collect_messages(
+        self,
+        for_agent: str,
+        type_filter: Optional[str] = None,
+    ) -> List[MailboxMessage]:
+        """收取发给指定 agent 的消息；可选按 type 过滤。"""
+        out = [m for m in self._mailbox if m.to_agent == for_agent]
+        if type_filter is not None:
+            out = [m for m in out if m.type == type_filter]
+        return out
+
+    def post_result(self, result: SubagentResult) -> str:
+        """子代理回传结构化结果给 main。"""
+        msg = MailboxMessage.create_result(result)
+        return self.post_message(msg)
+
+    def collect_results(self, for_agent: str = "main") -> List[SubagentResult]:
+        """收取发给 main 的 result 消息并解析为 SubagentResult 列表。"""
+        msgs = self.collect_messages(for_agent, type_filter=MESSAGE_TYPE_RESULT)
+        results = []
+        for m in msgs:
+            r = m.get_subagent_result()
+            if r is not None:
+                results.append(r)
+        return results
+
+    def get_latest_task_brief(self, for_agent: str) -> Optional[TaskBrief]:
+        """取发给指定子代理的最近一条 task 消息的 TaskBrief；若无则返回 None。"""
+        tasks = self.collect_messages(for_agent, type_filter=MESSAGE_TYPE_TASK)
+        if not tasks:
+            return None
+        latest = max(tasks, key=lambda m: m.created_at)
+        return latest.get_task_brief()
 
     # --- Artifact Management ---
 
@@ -259,6 +313,7 @@ class Blackboard:
             "artifact_count": len(self._artifacts),
             "context_keys": list(self._context.keys()),
             "event_count": len(self._event_log),
+            "mailbox_count": len(self._mailbox),
         }
 
 
@@ -376,6 +431,84 @@ class BaseEnhancedAgent(ABC):
             EnhancedAgentResult: 执行结果
         """
         pass
+
+    async def execute_async(self, task: str) -> EnhancedAgentResult:
+        """异步执行任务（默认实现，子类可重写）
+
+        Args:
+            task: 任务描述
+
+        Returns:
+            EnhancedAgentResult: 执行结果
+        """
+        # 默认实现：在线程池中执行同步方法
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, lambda: self.execute(task))
+
+    async def execute_from_mailbox(self) -> SubagentResult:
+        """从 Mailbox 获取任务并执行，结果回传到 Mailbox。
+
+        这是 Agent 的 Mailbox 协议入口：
+        1. 从 blackboard.get_latest_task_brief() 获取任务
+        2. 执行任务
+        3. 构造 SubagentResult 并 blackboard.post_result()
+
+        Returns:
+            SubagentResult: 结构化执行结果
+        """
+        task_brief = self.blackboard.get_latest_task_brief(self.AGENT_TYPE)
+        if not task_brief:
+            return SubagentResult(
+                task_id="",
+                from_agent=self.AGENT_TYPE,
+                success=False,
+                summary="No task found in mailbox",
+                error="No task brief available for this agent",
+            )
+
+        # 记录任务开始
+        logger.info(f"[{self.AGENT_TYPE}] Executing task: {task_brief.intent}")
+        self._set_state(EnhancedAgentState.EXECUTING)
+
+        try:
+            # 执行任务
+            result = await self.execute_async(task_brief.intent)
+
+            # 构造 SubagentResult
+            subagent_result = SubagentResult(
+                task_id=task_brief.task_id,
+                from_agent=self.AGENT_TYPE,
+                success=result.success,
+                summary=result.output[:200] if result.output else "Completed",
+                artifact_refs=list(result.artifacts.keys()) if result.artifacts else [],
+                error=result.error if not result.success else None,
+                metrics={
+                    "elapsed_time": result.elapsed_time,
+                    "iterations": result.iterations,
+                    "tokens_used": result.tokens_used,
+                },
+            )
+
+            # 回传结果到 Mailbox
+            self.blackboard.post_result(subagent_result)
+
+            self._set_state(EnhancedAgentState.IDLE)
+            return subagent_result
+
+        except Exception as e:
+            logger.exception(f"[{self.AGENT_TYPE}] Task execution failed: {e}")
+            self._set_state(EnhancedAgentState.ERROR)
+
+            error_result = SubagentResult(
+                task_id=task_brief.task_id,
+                from_agent=self.AGENT_TYPE,
+                success=False,
+                summary="Task execution failed",
+                error=str(e),
+            )
+
+            self.blackboard.post_result(error_result)
+            return error_result
 
     def _subscribe_to_events(self) -> None:
         """订阅事件"""
