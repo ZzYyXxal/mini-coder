@@ -6,6 +6,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **mini-coder** is a project to create a custom coding agent. The project uses a multi-agent system where Claude Code acts as the orchestrator, coordinating with specialized subagents for different aspects of the development workflow.
 
+Important architecture design is documented in the `docs` directory; major architecture changes are also updated there.
+
 ## Development Environment Setup
 
 ### Running the Setup Script

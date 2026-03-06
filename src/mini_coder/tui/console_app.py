@@ -9,10 +9,11 @@ import io
 import logging
 import signal
 import sys
+import time
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from rich.console import Console
 from rich.markdown import Markdown
@@ -23,6 +24,10 @@ from rich.text import Text
 
 from mini_coder.tui.models.config import Config
 from mini_coder.tui.models.thinking import ThinkingHistory
+
+# 对话耗时展示阈值（秒）：低于此值为较快(绿)，高于 DURATION_SLOW_S 为较慢(红)，中间为中等(黄)
+DURATION_FAST_S = 5.0
+DURATION_SLOW_S = 15.0
 
 
 class AppState(Enum):
@@ -138,6 +143,9 @@ class MiniCoderConsole:
 
         # Agent callback support
         self._orchestrator = None  # Will be set when orchestrator is created
+
+        # 非 TTY 时从 /dev/tty 读入，避免 stdin 为管道时执行一次命令后 readline() 即 EOF 导致直接退出
+        self._repl_input_stream = None  # 在 run() 中按 is_tty 设置
 
         # Set up signal handlers for clean exit
         signal.signal(signal.SIGINT, self._handle_sigint)
@@ -293,6 +301,7 @@ class MiniCoderConsole:
         Returns:
             User input string, or None if EOF reached.
         """
+        inp = getattr(self, "_repl_input_stream", None) or sys.stdin
         try:
             mode_display = Text()
             if self._ui_state.current_agent:
@@ -302,8 +311,8 @@ class MiniCoderConsole:
             mode_display.append(" ▶ ", style="default")
             self._console.print(mode_display, end="")
 
-            # Read a line from stdin
-            line = sys.stdin.readline()
+            # Read a line from stdin or /dev/tty（非 TTY 时 run() 会设为 /dev/tty，避免管道首行后即 EOF 退出）
+            line = inp.readline()
 
             if not line:  # EOF reached
                 return None
@@ -330,8 +339,12 @@ class MiniCoderConsole:
         path = Path.cwd() / "config" / "llm.yaml"
         return path if path.is_file() else None
 
-    def _ensure_llm_service(self) -> bool:
-        """确保 LLM 服务已初始化；若尚未初始化则创建并恢复/启动会话。
+    def _ensure_llm_service(self, init_session: bool = True) -> bool:
+        """确保 LLM 服务已初始化；若尚未初始化则创建，可选恢复/启动会话。
+
+        Args:
+            init_session: 为 True 时在首次创建后恢复或启动会话（正常对话需要）；
+                为 False 时仅创建服务不恢复/启动会话（用于 /clear 等，避免耗时 I/O）。
 
         Returns:
             True 表示已有或已成功创建 LLM 服务，False 表示无配置文件无法创建。
@@ -343,11 +356,22 @@ class MiniCoderConsole:
             return False
         if not hasattr(self, '_llm_service') or self._llm_service is None:
             self._llm_service = LLMService(str(llm_config_path))
-            if self._llm_service.memory_enabled:
+            need_session = init_session and self._llm_service.memory_enabled
+            if need_session:
                 if not self._llm_service.restore_latest_session():
                     self._llm_service.start_session(
                         str(self._working_directory) if self._working_directory else None
                     )
+            self._llm_session_initialized = need_session
+        else:
+            # 服务已存在但可能由 /clear 仅创建未初始化会话，在需要时补做
+            if init_session and not getattr(self, '_llm_session_initialized', True):
+                if self._llm_service.memory_enabled:
+                    if not self._llm_service.restore_latest_session():
+                        self._llm_service.start_session(
+                            str(self._working_directory) if self._working_directory else None
+                        )
+                self._llm_session_initialized = True
         return True
 
     # Loop detection constants
@@ -398,11 +422,51 @@ class MiniCoderConsole:
 
         return False
 
-    def _call_llm_stream_and_display(self, user_input: str) -> bool:
-        """Run streaming LLM call and display output (sync, optimized)."""
+    def _format_duration_color(
+        self,
+        sec: float,
+        no_response: bool = False,
+        to_first_sec: Optional[float] = None,
+    ) -> str:
+        """按耗时返回带 Rich 颜色标记的耗时文案（快绿/中黄/慢红）。"""
+        def _color(s: float) -> str:
+            if s < DURATION_FAST_S:
+                return "green"
+            if s < DURATION_SLOW_S:
+                return "yellow"
+            return "bold red"
+
+        parts: List[str] = []
+        if to_first_sec is not None:
+            parts.append(f"[{_color(to_first_sec)}]首字 {to_first_sec:.2f}s[/{_color(to_first_sec)}]")
+        text = f"本次对话耗时 {sec:.2f}s"
+        if no_response:
+            text += "（未获得响应）"
+        parts.append(f"[{_color(sec)}]{text}[/{_color(sec)}]")
+        return "，".join(parts)
+
+    def _call_llm_stream_and_display(
+        self, user_input: str
+    ) -> Tuple[bool, Optional[float], Optional[float]]:
+        """Run streaming LLM call and display output (sync, optimized).
+
+        Returns:
+            (是否得到有效响应, 本次对话总耗时秒数, 首字/首 token 耗时秒数；未计时时为 None)
+        """
+        # #region agent log
+        try:
+            _log = {"id": "tui_llm_entry", "timestamp": int(time.time() * 1000), "location": "console_app._call_llm_stream_and_display", "message": "request_handled_by", "data": {"handler": "llm_stream_only", "user_input_len": len(user_input)}, "hypothesisId": "H1"}
+            open("/root/LLM/mini-coder/.cursor/debug-2df2a3.log", "a", encoding="utf-8").write(__import__("json").dumps(_log, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
+        # #endregion
         if not self._ensure_llm_service():
             logging.warning("LLM config not found (config/llm.yaml); skipping LLM call")
-            return False
+            return (False, None, None)
+        t_start = time.perf_counter()
+        t_first_token: Optional[float] = None
+        duration_sec: Optional[float] = None
+        got_response = False
         try:
             # Debug 模式：显示上下文信息
             if self._ui_state.debug_mode:
@@ -417,6 +481,9 @@ class MiniCoderConsole:
                 if event.get("type") == "delta":
                     content = event.get("content") or ""
                     if content:
+                        # 首字/首 token：第一次收到并即将显示内容时打点
+                        if first:
+                            t_first_token = time.perf_counter()
                         full_response += content
 
                         # Check for loop
@@ -446,10 +513,13 @@ class MiniCoderConsole:
             if self._ui_state.debug_mode:
                 self._show_debug_response_info(full_response)
 
-            return not first
+            got_response = not first
         except Exception as e:
             logging.exception("LLM stream failed: %s", e)
-            return False
+        finally:
+            duration_sec = time.perf_counter() - t_start
+        duration_to_first_sec = (t_first_token - t_start) if t_first_token is not None else None
+        return (got_response, duration_sec, duration_to_first_sec)
 
     def _show_debug_context(self, user_input: str) -> None:
         """Debug 模式下显示 LLM 上下文信息。"""
@@ -515,13 +585,14 @@ class MiniCoderConsole:
             return True
 
         if command == "/clear":
-            # 清空对话历史
+            # 清空对话历史。若尚未初始化 LLM 服务则直接提示无历史可清，避免首次创建 LLMService 耗时过长导致卡顿或误触 Ctrl+C 退出。
             try:
-                if self._ensure_llm_service():
+                if hasattr(self, "_llm_service") and self._llm_service is not None:
                     self._llm_service.clear_history()
                     self._console.print("[dim yellow]对话历史已清除。[/dim]")
                 else:
-                    self._console.print("[dim]LLM 未配置，无对话历史可清除。[/dim]")
+                    # 未初始化过 LLM 服务则无需创建，直接提示，保证 /clear 瞬时完成
+                    self._console.print("[dim yellow]当前无对话历史。[/dim]")
             except Exception as e:
                 logging.warning(f"/clear failed: {e}", exc_info=True)
                 self._console.print(f"[dim yellow]清除对话历史时出错：{e}[/dim yellow]")
@@ -734,6 +805,14 @@ class MiniCoderConsole:
             event_type: "started" or "completed"
             result: EnhancedAgentResult (only for completed events)
         """
+        # #region agent log
+        try:
+            _at = getattr(agent_type, "value", str(agent_type))
+            _log = {"id": "tui_agent_event", "timestamp": int(time.time() * 1000), "location": "console_app.on_agent_event", "message": "agent_event_fired", "data": {"agent_type": _at, "event_type": event_type}, "hypothesisId": "H2"}
+            open("/root/LLM/mini-coder/.cursor/debug-2df2a3.log", "a", encoding="utf-8").write(__import__("json").dumps(_log, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
+        # #endregion
         agent_display = AgentDisplay.from_agent_type(agent_type)
         timestamp = asyncio.get_event_loop().time() if asyncio.get_event_loop().running() else 0
 
@@ -867,6 +946,15 @@ class MiniCoderConsole:
             # Display welcome message
             self._display_header()
 
+            # 非 TTY 时尽量从控制终端读入，避免管道 stdin 在首行后即 EOF 导致退出
+            if not is_tty:
+                try:
+                    self._repl_input_stream = open("/dev/tty", "r", encoding="utf-8")
+                except Exception:
+                    self._repl_input_stream = sys.stdin
+            else:
+                self._repl_input_stream = sys.stdin
+
             # Main REPL loop
             while True:
                 # Get user input（捕获 I/O 异常，避免 /clear 等操作后下一轮读输入时直接退出）
@@ -880,9 +968,17 @@ class MiniCoderConsole:
                     self._console.print("[yellow]Input error, please try again.[/yellow]")
                     user_input = ""
 
-                # Check for exit conditions
+                # Check for exit conditions：首次收到 EOF/中断不立即退出，避免管道或终端在命令/响应后误报 EOF 导致直接退出
                 if user_input is None:
-                    break
+                    _none_count = getattr(self, "_repl_none_count", 0) + 1
+                    self._repl_none_count = _none_count
+                    if _none_count >= 2:
+                        break
+                    self._console.print(
+                        "[dim]输入结束 (EOF) 或中断。再次输入以继续，或再触发一次以退出。[/dim]"
+                    )
+                    continue
+                self._repl_none_count = 0  # 成功读到输入则重置
 
                 # Check for quit commands
                 if user_input.lower() in ("q", "quit", "exit"):
@@ -900,12 +996,22 @@ class MiniCoderConsole:
                 self.set_state(AppState.RUNNING)
                 logging.info(f"Processing user input: {user_input[:50]}...")
 
+                # #region agent log
+                try:
+                    _log = {"id": "tui_run_loop", "timestamp": int(time.time() * 1000), "location": "console_app.run", "message": "request_path", "data": {"path": "llm_direct", "orchestrator_set": self._orchestrator is not None, "user_input_len": len(user_input)}, "hypothesisId": "H1"}
+                    open("/root/LLM/mini-coder/.cursor/debug-2df2a3.log", "a", encoding="utf-8").write(__import__("json").dumps(_log, ensure_ascii=False) + "\n")
+                except Exception:
+                    pass
+                # #endregion
+
                 # Show thinking status, then newline so streamed response appears below
                 self._display_thinking("Processing your request...")
                 self._console.print()
 
                 # Stream LLM response and print as it arrives
-                ok = self._call_llm_stream_and_display(user_input)
+                ok, duration_sec, duration_to_first_sec = self._call_llm_stream_and_display(
+                    user_input
+                )
                 self._console.print()
                 if not ok:
                     self._console.print(
@@ -916,6 +1022,15 @@ class MiniCoderConsole:
                         )
                     )
                     self._console.print()
+                # 在响应（或无响应提示）之后展示本次对话耗时（首字 + 总耗时）
+                if duration_sec is not None:
+                    self._console.print(
+                        self._format_duration_color(
+                            duration_sec,
+                            no_response=not ok,
+                            to_first_sec=duration_to_first_sec,
+                        )
+                    )
 
                 self.set_state(AppState.IDLE)
 
@@ -935,6 +1050,13 @@ class MiniCoderConsole:
             if old_settings is not None:
                 try:
                     termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, old_settings)
+                except Exception:
+                    pass
+            # 关闭非 stdin 的 REPL 输入流（如 /dev/tty），避免句柄泄漏
+            repl_inp = getattr(self, "_repl_input_stream", None)
+            if repl_inp is not None and repl_inp is not sys.stdin and not repl_inp.closed:
+                try:
+                    repl_inp.close()
                 except Exception:
                     pass
 
