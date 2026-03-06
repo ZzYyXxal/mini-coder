@@ -256,13 +256,19 @@ class MiniCoderConsole:
                 if not char:
                     return buffer.strip() if buffer else ""
 
-                # Handle Ctrl+C
+                # Handle Ctrl+C：若刚因 None 提示过“再次输入以继续”，则忽略本次 0x03 一次，避免误判为连续两次中断退出（见 docs/tui-repl-exit-analysis.md）
                 if ord(char) == 3:  # Ctrl+C
+                    if getattr(self, "_repl_ignore_next_interrupt", False):
+                        self._repl_ignore_next_interrupt = False
+                        continue
                     self._console.print()
                     return None
 
-                # Handle Ctrl+D (EOF)
+                # Handle Ctrl+D (EOF)：同上，忽略一次
                 if ord(char) == 4:  # Ctrl+D
+                    if getattr(self, "_repl_ignore_next_interrupt", False):
+                        self._repl_ignore_next_interrupt = False
+                        continue
                     self._console.print()
                     return None
 
@@ -374,6 +380,34 @@ class MiniCoderConsole:
                 self._llm_session_initialized = True
         return True
 
+    def _ensure_orchestrator(self) -> bool:
+        """确保已创建 WorkflowOrchestrator 并注册 TUI 回调，用于 agent 派发与流转记录。
+
+        Returns:
+            True 表示已有或已成功创建并注册 orchestrator，False 表示无法创建（如无 LLM 配置）。
+        """
+        if not self._ensure_llm_service():
+            return False
+        if self._orchestrator is not None:
+            return True
+        try:
+            from mini_coder.agents.orchestrator import (
+                WorkflowOrchestrator,
+                WorkflowConfig,
+            )
+            self._orchestrator = WorkflowOrchestrator(
+                llm_service=self._llm_service,
+                config=WorkflowConfig(),
+                command_executor=None,
+            )
+            self.register_agent_callback(self._orchestrator)
+            logging.info("Orchestrator created and callbacks registered for TUI")
+        except Exception as e:
+            logging.exception("Failed to create orchestrator: %s", e)
+            self._orchestrator = None
+            return False
+        return True
+
     # Loop detection constants
     MAX_RESPONSE_LENGTH = 50000  # Maximum characters in a single response
     MAX_REPEATED_PATTERN = 5     # Maximum times a pattern can repeat consecutively
@@ -444,6 +478,34 @@ class MiniCoderConsole:
             text += "（未获得响应）"
         parts.append(f"[{_color(sec)}]{text}[/{_color(sec)}]")
         return "，".join(parts)
+
+    def _call_orchestrator_dispatch_and_display(
+        self, user_input: str
+    ) -> Tuple[bool, Optional[float], Optional[float]]:
+        """经 WorkflowOrchestrator 派发子 agent 执行并展示结果，用于 TUI 下 agent 流转与 /agents 记录。
+
+        Returns:
+            (是否成功得到有效输出, 本次总耗时秒数, 首字耗时；非流式固定为 None)
+        """
+        if self._orchestrator is None:
+            return (False, None, None)
+        t_start = time.perf_counter()
+        try:
+            result = self._orchestrator.dispatch(user_input)
+        except Exception as e:
+            logging.exception("Orchestrator dispatch failed: %s", e)
+            duration_sec = time.perf_counter() - t_start
+            self._console.print(f"[red]派发失败: {e}[/red]")
+            return (False, duration_sec, None)
+        duration_sec = time.perf_counter() - t_start
+        ok = getattr(result, "success", False)
+        output = getattr(result, "output", "") or ""
+        error = getattr(result, "error", "") or ""
+        if output:
+            self._console.print(Markdown(output))
+        if not ok and error:
+            self._console.print(Panel(f"[red]{error}[/red]", title="错误", border_style="red"))
+        return (ok, duration_sec, None)
 
     def _call_llm_stream_and_display(
         self, user_input: str
@@ -953,7 +1015,7 @@ class MiniCoderConsole:
                     self._console.print("[yellow]Input error, please try again.[/yellow]")
                     user_input = ""
 
-                # Check for exit conditions：首次收到 EOF/中断不立即退出，避免管道或终端在命令/响应后误报 EOF 导致直接退出
+                # Check for exit conditions：首次收到 EOF/中断不立即退出，避免管道或终端在命令/响应后误报导致直接退出（见 docs/tui-repl-exit-analysis.md）
                 if user_input is None:
                     _none_count = getattr(self, "_repl_none_count", 0) + 1
                     self._repl_none_count = _none_count
@@ -962,8 +1024,12 @@ class MiniCoderConsole:
                     self._console.print(
                         "[dim]输入结束 (EOF) 或中断。再次输入以继续，或再触发一次以退出。[/dim]"
                     )
+                    # TTY 模式下下一轮读到的第一个 0x03/0x04 视为误触，忽略一次，避免“连续两次中断”误退出
+                    if is_tty:
+                        self._repl_ignore_next_interrupt = True
                     continue
                 self._repl_none_count = 0  # 成功读到输入则重置
+                self._repl_ignore_next_interrupt = False
 
                 # Check for quit commands
                 if user_input.lower() in ("q", "quit", "exit"):
@@ -973,22 +1039,33 @@ class MiniCoderConsole:
                 if not user_input:
                     continue
 
-                # Handle special commands
-                if self._handle_special_commands(user_input):
+                # Handle special commands（捕获 KeyboardInterrupt，避免命令执行中误触 Ctrl+C 导致进程直接退出，见 docs/tui-repl-exit-analysis.md）
+                try:
+                    if self._handle_special_commands(user_input):
+                        continue
+                except KeyboardInterrupt:
+                    self._console.print("[dim]已取消。[/dim]")
                     continue
 
                 # Process the input
                 self.set_state(AppState.RUNNING)
                 logging.info(f"Processing user input: {user_input[:50]}...")
 
-                # Show thinking status, then newline so streamed response appears below
+                # Show thinking status, then newline so response appears below
                 self._display_thinking("Processing your request...")
                 self._console.print()
 
-                # Stream LLM response and print as it arrives
-                ok, duration_sec, duration_to_first_sec = self._call_llm_stream_and_display(
-                    user_input
-                )
+                # 优先经 orchestrator 派发，以便记录 agent 流转并在 /agents 中展示
+                use_orchestrator = self._ensure_orchestrator()
+                if use_orchestrator:
+                    ok, duration_sec, duration_to_first_sec = self._call_orchestrator_dispatch_and_display(
+                        user_input
+                    )
+                else:
+                    ok, duration_sec, duration_to_first_sec = self._call_llm_stream_and_display(
+                        user_input
+                    )
+
                 self._console.print()
                 if not ok:
                     self._console.print(

@@ -52,6 +52,16 @@
 | 为什么对话中没有体现 agent 切换/派发？ | TUI 主流程只调用了 `LLMService.chat_stream()`，没有经过 `WorkflowOrchestrator.dispatch()` 或 `execute_workflow()`，因此不会出现子 agent 派发或切换。 |
 | 设计中「记录 agent 流转」是否有？ | 有。`agent_history` + `on_agent_event` + `/agents` 展示已实现，但因 TUI 未与 orchestrator 集成，该功能在 TUI 下从未被触发，等价于未生效。 |
 
-## 5. 建议改动方向（非本次实现）
+## 5. 运行时验证结果（基于 .cursor/debug-2df2a3.log）
+
+| 假设 | 结论 | 证据 |
+|------|------|------|
+| **H1** | **CONFIRMED** | 每次请求均有 `request_path` 且 `path: "llm_direct"`、`orchestrator_set: false`；且紧接出现 `request_handled_by`、`handler: "llm_stream_only"`。例：第 1–2 行、第 3–4 行。 |
+| **H2** | **CONFIRMED** | 整个日志中**无**任何 `agent_event_fired` 或 `tui_agent_event` 记录，故 `on_agent_event` 从未被调用。 |
+| **H3** | **CONFIRMED** | 由 H2 知 `on_agent_event` 未执行，`agent_history` 不会被写入；`/agents` 展示为空。 |
+| **H4** | **CONFIRMED** | 由 H1 知所有用户输入（含「切换成code agent」）均以 `llm_direct` + `llm_stream_only` 处理，未经过意图分析或 dispatch。 |
+| **H5** | **CONFIRMED** | 流转记录逻辑已实现，但因 TUI 未接入 orchestrator，回调从未触发，功能在 TUI 下未生效。 |
+
+## 6. 建议改动方向（非本次实现）
 
 - 在 TUI 中增加「多 agent 模式」：在合适入口（例如配置或启动参数）创建 `WorkflowOrchestrator`，并将用户消息先经意图分析/派发，再决定是走 `orchestrator.dispatch()` 还是直接 `chat_stream()`；同时在该路径下调用 `register_agent_callback(orchestrator)`，这样 `on_agent_event` 会被触发，`agent_history` 与 `/agents` 才会出现流转记录。
