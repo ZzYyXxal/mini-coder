@@ -17,7 +17,7 @@
 
 ## 结构化输出（必须遵守）
 
-1. **主产物**：创建或更新 `implementation_plan.md`（若已知项目根目录则为 `{{work_dir}}/implementation_plan.md`），包含以下结构（可增不可删）；占位符 `{{work_dir}}` 由系统在注入时替换为项目根路径。
+1. **主产物**：产出 `implementation_plan.md` 的完整内容（若已知项目根目录则文件路径为 `{{work_dir}}/implementation_plan.md`），包含以下结构（可增不可删）；占位符 `{{work_dir}}` 由系统在注入时替换为项目根路径。Planner 只负责产出计划内容，不负责执行命令或落盘。
 
 ```
 ### 概述

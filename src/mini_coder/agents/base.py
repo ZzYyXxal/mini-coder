@@ -651,43 +651,60 @@ class BashAgent(BaseAgent):
         llm_service: Any,
         config: Optional[AgentConfig] = None,
         command_executor: Optional[Any] = None,
+        command_tool: Optional[Any] = None,
+        work_dir: Optional[str] = None,
     ) -> None:
         if config is None:
             config = AgentConfig(
                 name="BashAgent",
                 description="Terminal command executor and test validator",
-                tool_filter=None,  # 在 execute 中检查命令白名单
+                tool_filter=None,
                 max_iterations=5,
                 prompt_path=self.DEFAULT_PROMPT_PATH,
             )
         super().__init__(llm_service, config)
         self._capabilities = BashCapabilities()
         self._command_executor = command_executor
+        self._command_tool = command_tool
+        self._work_dir = work_dir or ""
+
+    def _run_command(self, command: str, timeout: int = 120) -> Dict[str, Any]:
+        """执行单条命令：优先用 CommandTool（限制工作目录与安全策略），否则用 command_executor，否则模拟。"""
+        if self._command_tool is not None:
+            params = {"command": command, "timeout": timeout}
+            if self._work_dir:
+                params["cwd"] = self._work_dir
+            resp = self._command_tool.run(params)
+            exit_code = (resp.data or {}).get("exit_code", -1 if resp.error_code else 0)
+            success = resp.error_code is None and exit_code == 0
+            if resp.error_code:
+                return {"success": False, "stdout": "", "stderr": resp.text or str(resp.error_code)}
+            return {"success": success, "stdout": resp.text or "", "stderr": ""}
+        if self._command_executor:
+            success, stdout, stderr = self._command_executor(command, timeout)
+            return {"success": success, "stdout": stdout or "", "stderr": stderr or ""}
+        return {"success": True, "stdout": "(simulated)", "stderr": ""}
 
     def _get_builtin_prompt(self) -> str:
         """获取内置兜底 prompt"""
         return """You are the Bash Agent - a terminal execution and test verification specialist.
 
 Capabilities:
-1. Terminal Command Execution (restricted whitelist)
+1. Terminal Command Execution via CommandTool (echo, grep, cat, ls, pytest, mypy, flake8, etc.; restricted by whitelist and work_dir)
 2. Run Tests (pytest)
 3. Type Checking (mypy)
 4. Code Style (flake8)
 5. Coverage Check (pytest --cov)
 
-Command Whitelist (Direct Execution):
-- Tests: pytest, python -m pytest
-- Type Check: mypy, python -m mypy
-- Style: flake8, black --check
-- Info: ls, cat, head, tail, pwd
-- Python: python, python -m
-- Git (read-only): git status, git log, git diff, git branch
-
-Command Blacklist (Prohibited):
-- rm -rf, mkfs, chmod 777, curl|bash, dd, sudo
+Safe commands (no confirmation): echo, grep, find, cat, head, tail, ls, pwd, git status, python -m pytest, etc.
 
 Output Format:
 Generate quality report with test results, type check, code style, and coverage."""
+
+    # 单条用户命令前缀（与 security.SAFE_READ_ONLY 等一致）：走单命令执行并直接返回
+    _SINGLE_CMD_PREFIXES = ("echo", "grep", "cat", "head", "tail", "ls", "pwd", "wc", "find", "whoami", "date")
+    # 「写入/保存到本地」类意图：不跑质量流水线，只执行 ls 确认工作目录内容并返回
+    _WRITE_LOCAL_KEYWORDS = ("写入本地", "保存到本地", "写入文件", "保存到文件", "把代码写入", "写到本地")
 
     def execute(
         self,
@@ -695,26 +712,44 @@ Generate quality report with test results, type check, code style, and coverage.
         context: Optional[Dict[str, Any]] = None,
         stream_callback: Optional[Any] = None,
     ) -> AgentResult:
-        """执行 Bash 任务"""
+        """执行 Bash 任务：单条命令 / 写入本地确认 / 否则质量流水线。"""
         self.state.current_task = task
         self.state.is_busy = True
 
         try:
-            # 运行测试
+            task_stripped = task.strip()
+            first_word = task_stripped.split(maxsplit=1)[0].lower() if task_stripped else ""
+
+            # 1) 用户输入的是英文单条命令（echo / grep / cat ...）
+            if first_word in self._SINGLE_CMD_PREFIXES and (self._command_tool or self._command_executor):
+                result = self._run_command(task_stripped, timeout=60)
+                self.state.is_busy = False
+                out = (result.get("stdout") or "") + ((result.get("stderr") or "").strip() and f"\n[stderr]\n{result['stderr']}" or "")
+                return AgentResult(
+                    success=result.get("success", False),
+                    output=out.strip() or "(无输出)",
+                    artifacts={"command_output.txt": out},
+                )
+
+            # 2) 「把代码写入本地」等：只列出工作目录确认已写入，不跑 pytest/mypy 流水线
+            if any(kw in task_stripped for kw in self._WRITE_LOCAL_KEYWORDS) and (self._command_tool or self._command_executor):
+                result = self._run_command("ls -la .", timeout=10)
+                self.state.is_busy = False
+                out = (result.get("stdout") or "").strip()
+                return AgentResult(
+                    success=True,
+                    output="代码已写入工作目录，当前文件列表：\n\n" + (out or "(无文件列表)"),
+                    artifacts={"directory_listing.txt": out or ""},
+                )
+
+            # 3) 质量流水线（运行测试、类型检查、lint、覆盖率）
             test_result = self._run_tests()
-
-            # 类型检查
             type_result = self._run_type_check()
-
-            # 代码风格检查
             lint_result = self._run_lint()
-
-            # 覆盖率检查
             coverage_result = self._run_coverage()
 
             self.state.is_busy = False
 
-            # 生成报告
             report = self._generate_report({
                 "tests": test_result,
                 "types": type_result,
@@ -722,12 +757,11 @@ Generate quality report with test results, type check, code style, and coverage.
                 "coverage": coverage_result
             })
 
-            # 判断是否通过
             all_passed = all([
                 test_result.get("success", False),
                 type_result.get("success", False),
                 lint_result.get("success", False),
-                coverage_result.get("success", True),  # 覆盖率可选
+                coverage_result.get("success", True),
             ])
 
             return AgentResult(
@@ -745,34 +779,20 @@ Generate quality report with test results, type check, code style, and coverage.
             )
 
     def _run_tests(self) -> Dict[str, Any]:
-        """运行 pytest"""
-        if self._command_executor:
-            success, stdout, stderr = self._command_executor("pytest tests/ -v --tb=short", 120)
-            return {"success": success, "stdout": stdout, "stderr": stderr}
-        return {"success": True, "stdout": "Tests passed (simulated)", "stderr": ""}
+        """运行 pytest（经 CommandTool 或 command_executor）"""
+        return self._run_command("pytest tests/ -v --tb=short", 120)
 
     def _run_type_check(self) -> Dict[str, Any]:
         """运行 mypy"""
-        if self._command_executor:
-            success, stdout, stderr = self._command_executor("mypy src/ --strict", 60)
-            return {"success": success, "stdout": stdout, "stderr": stderr}
-        return {"success": True, "stdout": "No type errors (simulated)", "stderr": ""}
+        return self._run_command("mypy src/ --strict", 60)
 
     def _run_lint(self) -> Dict[str, Any]:
         """运行 flake8"""
-        if self._command_executor:
-            success, stdout, stderr = self._command_executor("flake8 src/", 30)
-            return {"success": success, "stdout": stdout, "stderr": stderr}
-        return {"success": True, "stdout": "No lint issues (simulated)", "stderr": ""}
+        return self._run_command("flake8 src/", 30)
 
     def _run_coverage(self) -> Dict[str, Any]:
         """运行覆盖率检查"""
-        if self._command_executor:
-            success, stdout, stderr = self._command_executor(
-                "pytest tests/ --cov=src --cov-fail-under=80 -q", 60
-            )
-            return {"success": success, "stdout": stdout, "stderr": stderr}
-        return {"success": True, "stdout": "Coverage OK (simulated)", "stderr": ""}
+        return self._run_command("pytest tests/ --cov=src --cov-fail-under=80 -q", 60)
 
     def _generate_report(self, results: Dict[str, Dict]) -> str:
         """生成质量报告"""

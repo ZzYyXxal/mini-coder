@@ -1210,6 +1210,8 @@ class CoderAgent(BaseEnhancedAgent):
 
 **项目根目录（所有文件路径必须基于此，禁止使用 /home/user 等占位路径）**: {work_dir or "（未设置）"}
 
+**回复格式**：先按顺序输出每个文件的代码块（\`\`\`python 换行 文件路径 换行 完整源代码 \`\`\`），再输出【实现结果】摘要；不可只输出摘要不输出代码。
+
 已有代码（若是重试）:
 {existing_code_str if existing_code_str else "无"}
 """

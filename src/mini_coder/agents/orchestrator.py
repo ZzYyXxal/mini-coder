@@ -93,6 +93,8 @@ from mini_coder.agents.mailbox import (
 
 from mini_coder.agents.scheduler import ParallelScheduler
 from mini_coder.tools.filter import BashRestrictedFilter
+from mini_coder.tools.command import CommandTool
+from mini_coder.tools.security import SecurityMode
 
 logger = logging.getLogger(__name__)
 
@@ -771,6 +773,20 @@ Respond with only one word: EXPLORER, PLANNER, CODER, REVIEWER, BASH, GENERAL_PU
         elif agent_type == SubAgentType.REVIEWER:
             return ReviewerAgent(self.llm_service)
         elif agent_type == SubAgentType.BASH:
+            work_dir = None
+            if self._context is not None:
+                work_dir = self._context.blackboard.get_context("work_dir")
+            work_dir = str(work_dir) if work_dir else ""
+            command_tool = None
+            if work_dir:
+                command_tool = CommandTool(
+                    security_mode=SecurityMode.NORMAL,
+                    config={
+                        "allowed_paths": [work_dir],
+                        "timeout": 120,
+                        "max_output_length": 30000,
+                    },
+                )
             return BashAgent(
                 self.llm_service,
                 config=AgentConfig(
@@ -780,6 +796,8 @@ Respond with only one word: EXPLORER, PLANNER, CODER, REVIEWER, BASH, GENERAL_PU
                     max_iterations=10,
                 ),
                 command_executor=self.command_executor,
+                command_tool=command_tool,
+                work_dir=work_dir or None,
             )
         elif agent_type == SubAgentType.GENERAL_PURPOSE:
             return GeneralPurposeAgent(self.llm_service)

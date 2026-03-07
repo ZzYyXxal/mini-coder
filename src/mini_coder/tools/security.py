@@ -61,9 +61,10 @@ class SecurityLevel:
         "hostname", "uname", "env", "printenv", "set", "unset",
         "which", "whereis", "whatis", "type",
 
-        # 文件查看
+        # 文件查看与搜索
         "cat", "head", "tail", "less", "more", "wc",
         "stat", "file", "tree", "du", "df", "free",
+        "grep", "find", "locate",
 
         # Git 只读操作
         "git status", "git log", "git diff", "git show",

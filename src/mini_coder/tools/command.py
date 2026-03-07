@@ -116,6 +116,8 @@ class CommandTool(BaseTool):
             ToolResponse: 执行结果
         """
         command = parameters.get("command", "")
+        cwd = parameters.get("cwd")
+        timeout = parameters.get("timeout")
         logger.info(f"[CommandTool] Executing: {command[:100]}{'...' if len(command) > 100 else ''}")
 
         if not command:
@@ -128,8 +130,8 @@ class CommandTool(BaseTool):
         # 通知事件：开始执行
         self.notify_event("start", {"command": command})
 
-        # 安全检查并执行
-        result = self._execute_with_security(command, parameters.get("timeout"))
+        # 安全检查并执行（支持 cwd 限制工作目录）
+        result = self._execute_with_security(command, timeout=timeout, cwd=cwd)
 
         # 通知事件：完成
         self.notify_event("complete", {
@@ -169,16 +171,15 @@ class CommandTool(BaseTool):
     def _execute_with_security(
         self,
         command: str,
-        timeout: Optional[int] = None
+        timeout: Optional[int] = None,
+        cwd: Optional[str] = None,
     ) -> CommandResult:
-        """带安全检查的执行
+        """带安全检查的执行，支持 cwd 限制工作目录。
 
         Args:
             command: 要执行的命令
             timeout: 可选的超时时间
-
-        Returns:
-            CommandResult: 执行结果
+            cwd: 可选的工作目录（若设置了 allowed_paths 则必须在其内）
         """
         # Layer 1: 黑名单检查
         if self._executor._security.is_banned(command):
@@ -201,7 +202,7 @@ class CommandTool(BaseTool):
                 "command": command,
                 "category": "safe",
             })
-            return self._executor.execute(command, timeout=timeout)
+            return self._executor.execute(command, timeout=timeout, cwd=cwd)
 
         # Layer 3: 根据安全模式处理
         if self.security_mode == SecurityMode.STRICT:
@@ -215,8 +216,7 @@ class CommandTool(BaseTool):
 
         if self.security_mode == SecurityMode.TRUST:
             logger.debug(f"[CommandTool] Command ALLOWED (trust mode): {command[:50]}...")
-            # 信任模式：只有黑名单检查
-            return self._executor.execute(command, timeout=timeout)
+            return self._executor.execute(command, timeout=timeout, cwd=cwd)
 
         # Normal 模式：需要确认
         logger.debug(f"[CommandTool] Command requires confirmation: {command[:50]}...")
@@ -238,7 +238,7 @@ class CommandTool(BaseTool):
                     exit_code=1,
                 )
 
-        return self._executor.execute(command, timeout=timeout)
+        return self._executor.execute(command, timeout=timeout, cwd=cwd)
 
     def get_parameters(self) -> list[ToolParameter]:
         """获取工具参数定义"""
@@ -248,6 +248,12 @@ class CommandTool(BaseTool):
                 type="string",
                 description="要执行的命令",
                 required=True
+            ),
+            ToolParameter(
+                name="cwd",
+                type="string",
+                description="可选的工作目录，需在 allowed_paths 内",
+                required=False
             ),
             ToolParameter(
                 name="timeout",
