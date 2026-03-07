@@ -442,10 +442,11 @@ class MiniCoderConsole:
             "GENERAL_PURPOSE",
             "MINI_CODER_GUIDE",
         ]
+        bash_mode: Literal["quality_report", "confirm_save", "single_command"]
         confidence: float
         reason: str
 
-    # 路由用 system 提示，与主对话隔离，不写入 _context_manager
+    # 路由用 system 提示，与主对话隔离，不写入 _context_manager；BASH 的 bash_mode 由路由层决定
     # 各子 agent 职责写清，便于区分 BASH（执行命令）与 CODER（写代码/编辑内容），参考 Claude Code bash command 语义
     _ROUTER_SYSTEM = (
         "你是一个路由器，只负责根据用户输入决定：由主代理直接回答，还是派发到哪个子代理，或进入多阶段工作流。\n"
@@ -454,6 +455,7 @@ class MiniCoderConsole:
         "- JSON 字段：\n"
         '  - route: "main" | "dispatch" | "workflow"\n'
         '  - agent: 仅当 route=dispatch 时必填，取值见下\n'
+        '  - bash_mode: 仅当 agent=BASH 时必填，取值 quality_report | confirm_save | single_command（见 BASH 说明）\n'
         "  - confidence: 0~1\n"
         "  - reason: 简短中文原因\n"
         "路由规则：\n"
@@ -463,7 +465,7 @@ class MiniCoderConsole:
         "  - PLANNER: 需求分析、任务拆解、TDD 规划、写 implementation_plan.md。\n"
         "  - CODER: 编写或编辑代码/文件内容（实现功能、新建或修改源文件）。\n"
         "  - REVIEWER: 代码质量与架构对齐评审（只读，不执行命令）。\n"
-        '  - BASH: 在终端执行具体命令（如运行测试 pytest、类型检查 mypy、lint、或执行「将已有内容写入/保存到本地」的操作）。仅当用户意图是「执行某条命令」或「运行/验证/保存到本地」时选 BASH；若意图是「写代码/实现功能/创建文件内容」应选 CODER。\n'
+        "  - BASH: 终端执行。选 BASH 时必填 bash_mode：quality_report=用户要跑测试/验证质量/生成质量报告；confirm_save=用户要「把代码写入本地/保存到本地/确认已写入」仅列目录不跑测试；single_command=用户给了一条具体命令（如 ls、pytest）。若意图是写代码/实现功能应选 CODER。\n"
         "  - GENERAL_PURPOSE: 快速只读搜索、通用代码查找。\n"
         "  - MINI_CODER_GUIDE: 回答与 mini-coder 本身的使用、配置、工作流问题。\n"
         '- "workflow": 用户明确要“从需求到实现到测试”的完整闭环，或多步骤连续执行（规划→实现→测试/验证）。\n'
@@ -600,15 +602,19 @@ class MiniCoderConsole:
         return "，".join(parts)
 
     def _call_orchestrator_dispatch_and_display(
-        self, user_input: str, forced_agent: Optional[str] = None
-    ) -> Tuple[bool, Optional[float], Optional[float]]:
+        self,
+        user_input: str,
+        forced_agent: Optional[str] = None,
+        route_decision: Optional["_RouteDecision"] = None,
+    ) -> Tuple[bool, Optional[float], Optional[float], bool]:
         """经 WorkflowOrchestrator 派发子 agent 执行并展示结果；支持子 agent 流式输出与首字耗时。
 
+        当 forced_agent 为 BASH 时，从 route_decision 读取 bash_mode 传入 context，供 BashAgent 分支（质量流水线 / 确认写入 / 单条命令）。
         Returns:
-            (是否成功得到有效输出, 本次总耗时秒数, 首字耗时；未流式时为 None)
+            (是否成功, 本次总耗时秒数, 首字耗时, 是否有输出内容)
         """
         if self._orchestrator is None:
-            return (False, None, None)
+            return (False, None, None, False)
         t_start = time.perf_counter()
         t_first_token: Optional[float] = None
         had_streaming = False
@@ -627,8 +633,15 @@ class MiniCoderConsole:
                 from mini_coder.agents.orchestrator import SubAgentType
 
                 agent_type = SubAgentType[forced_agent]
+                dispatch_context: Optional[Dict[str, Any]] = None
+                # 仅当路由明确返回 bash_mode 时传入；不默认 quality_report（质量流水线由用户/Orchestrator 显式触发，见 docs/quality-pipeline-spec.md）
+                if agent_type == SubAgentType.BASH and route_decision and route_decision.get("bash_mode"):
+                    dispatch_context = {"bash_mode": route_decision["bash_mode"]}
                 result = self._orchestrator.dispatch_with_agent(
-                    agent_type, user_input, stream_callback=stream_callback
+                    agent_type,
+                    user_input,
+                    context=dispatch_context,
+                    stream_callback=stream_callback,
                 )
             else:
                 result = self._orchestrator.dispatch(
@@ -638,7 +651,7 @@ class MiniCoderConsole:
             logging.exception("Orchestrator dispatch failed: %s", e)
             duration_sec = time.perf_counter() - t_start
             self._console.print(f"[red]派发失败: {e}[/red]")
-            return (False, duration_sec, None)
+            return (False, duration_sec, None, False)
         duration_sec = time.perf_counter() - t_start
         ok = getattr(result, "success", False)
         output = getattr(result, "output", "") or ""
@@ -650,7 +663,8 @@ class MiniCoderConsole:
         if not ok and error:
             self._console.print(Panel(f"[red]{error}[/red]", title="错误", border_style="red"))
         duration_to_first = (t_first_token - t_start) if t_first_token is not None else None
-        return (ok, duration_sec, duration_to_first)
+        had_output = had_streaming or bool(output.strip())
+        return (ok, duration_sec, duration_to_first, had_output)
 
     def _call_orchestrator_workflow_and_display(
         self, user_input: str
@@ -1299,6 +1313,7 @@ class MiniCoderConsole:
                 t_before_route = time.perf_counter()
                 decision = self._route_user_input(user_input)
                 route = decision.get("route") or "dispatch"
+                had_output = True  # 非 dispatch 分支不显示「无响应」；dispatch 分支会覆盖
                 logging.debug(
                     "[TUI] route decision total=%.3fs, route=%s",
                     time.perf_counter() - t_before_route,
@@ -1323,12 +1338,11 @@ class MiniCoderConsole:
                         )
                     else:
                         forced_agent = decision.get("agent")
-                        ok, duration_sec, duration_to_first_sec = self._call_orchestrator_dispatch_and_display(
-                            user_input, forced_agent=forced_agent
+                        ok, duration_sec, duration_to_first_sec, had_output = self._call_orchestrator_dispatch_and_display(
+                            user_input, forced_agent=forced_agent, route_decision=decision
                         )
-
                 self._console.print()
-                if not ok:
+                if not ok and not had_output:
                     self._console.print(
                         Panel(
                             f"[bold]Input received:[/bold] {user_input}\n\n"

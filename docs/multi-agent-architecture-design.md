@@ -241,6 +241,14 @@
 **禁止执行**:
 - `rm -rf`, `mkfs`, `chmod 777`, `curl|bash` 等危险命令
 
+### 3.7 质量流水线规格（何时跑、谁触发）
+
+质量流水线（pytest + mypy + flake8 + coverage + 报告）**仅由用户、Planner 或 Orchestrator 显式触发**；Bash **不自行决定**是否跑测试。
+
+- **何时跑**：用户明确要求「运行测试/验证质量/生成质量报告」、Orchestrator 在 dispatch 时传入 `bash_mode=quality_report`、或工作流进入 TESTING/VERIFYING 阶段由 TesterAgent 执行。
+- **何时不跑**：未显式请求时；或意图为「写入/保存到本地」「执行单条命令」等且已通过 `bash_mode` 指定为 `confirm_save` / `single_command` 时。
+- **实现约定**：BashAgent 仅在 `context["bash_mode"] == "quality_report"` 时执行流水线；缺省不跑，并提示调用方明确指定。详见 **docs/quality-pipeline-spec.md**。
+
 ---
 
 ## 4. 工作流设计

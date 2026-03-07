@@ -701,10 +701,8 @@ Safe commands (no confirmation): echo, grep, find, cat, head, tail, ls, pwd, git
 Output Format:
 Generate quality report with test results, type check, code style, and coverage."""
 
-    # 单条用户命令前缀（与 security.SAFE_READ_ONLY 等一致）：走单命令执行并直接返回
+    # 单条命令安全前缀（仅当 bash_mode=single_command 且首词在此列表内才执行，与 security.SAFE_READ_ONLY 一致）
     _SINGLE_CMD_PREFIXES = ("echo", "grep", "cat", "head", "tail", "ls", "pwd", "wc", "find", "whoami", "date")
-    # 「写入/保存到本地」类意图：不跑质量流水线，只执行 ls 确认工作目录内容并返回
-    _WRITE_LOCAL_KEYWORDS = ("写入本地", "保存到本地", "写入文件", "保存到文件", "把代码写入", "写到本地")
 
     def execute(
         self,
@@ -712,27 +710,24 @@ Generate quality report with test results, type check, code style, and coverage.
         context: Optional[Dict[str, Any]] = None,
         stream_callback: Optional[Any] = None,
     ) -> AgentResult:
-        """执行 Bash 任务：单条命令 / 写入本地确认 / 否则质量流水线。"""
+        """执行 Bash 任务。行为由 context['bash_mode'] 决定（由用户/Planner/Orchestrator 传入，Bash 不自行决定是否跑测试）：
+
+        - quality_report：仅当调用方显式要求时跑完整质量流水线
+        - confirm_save：仅列出工作目录确认写入，不跑测试
+        - single_command：将 task 当作单条命令执行（仅当首词在白名单内时执行）
+        - 未设置或其它：不跑流水线，返回提示
+        """
         self.state.current_task = task
         self.state.is_busy = True
+        ctx = context or {}
+        bash_mode = ctx.get("bash_mode")
 
         try:
             task_stripped = task.strip()
             first_word = task_stripped.split(maxsplit=1)[0].lower() if task_stripped else ""
 
-            # 1) 用户输入的是英文单条命令（echo / grep / cat ...）
-            if first_word in self._SINGLE_CMD_PREFIXES and (self._command_tool or self._command_executor):
-                result = self._run_command(task_stripped, timeout=60)
-                self.state.is_busy = False
-                out = (result.get("stdout") or "") + ((result.get("stderr") or "").strip() and f"\n[stderr]\n{result['stderr']}" or "")
-                return AgentResult(
-                    success=result.get("success", False),
-                    output=out.strip() or "(无输出)",
-                    artifacts={"command_output.txt": out},
-                )
-
-            # 2) 「把代码写入本地」等：只列出工作目录确认已写入，不跑 pytest/mypy 流水线
-            if any(kw in task_stripped for kw in self._WRITE_LOCAL_KEYWORDS) and (self._command_tool or self._command_executor):
+            # 1) confirm_save：调用方判定为「写入/保存到本地」意图，只列目录
+            if bash_mode == "confirm_save" and (self._command_tool or self._command_executor):
                 result = self._run_command("ls -la .", timeout=10)
                 self.state.is_busy = False
                 out = (result.get("stdout") or "").strip()
@@ -742,7 +737,32 @@ Generate quality report with test results, type check, code style, and coverage.
                     artifacts={"directory_listing.txt": out or ""},
                 )
 
-            # 3) 质量流水线（运行测试、类型检查、lint、覆盖率）
+            # 2) single_command：仅当首词在白名单内时执行该命令
+            if bash_mode == "single_command" and (self._command_tool or self._command_executor):
+                if first_word in self._SINGLE_CMD_PREFIXES:
+                    result = self._run_command(task_stripped, timeout=60)
+                    self.state.is_busy = False
+                    out = (result.get("stdout") or "") + ((result.get("stderr") or "").strip() and f"\n[stderr]\n{result['stderr']}" or "")
+                    return AgentResult(
+                        success=result.get("success", False),
+                        output=out.strip() or "(无输出)",
+                        artifacts={"command_output.txt": out},
+                    )
+                self.state.is_busy = False
+                return AgentResult(
+                    success=False,
+                    output=f"单条命令模式仅支持首词为 {self._SINGLE_CMD_PREFIXES} 之一的命令，当前首词「{first_word}」不在列表中。",
+                )
+
+            # 3) quality_report：仅当调用方显式传入时跑完整质量流水线（见 docs/quality-pipeline-spec.md）
+            if bash_mode != "quality_report":
+                self.state.is_busy = False
+                return AgentResult(
+                    success=False,
+                    output="未收到执行质量流水线的指令。请由用户（通过路由）、Planner 或 Orchestrator 明确指定 bash_mode=quality_report 后再执行测试与质量报告。",
+                )
+
+            # 4) 显式 quality_report：完整质量流水线
             test_result = self._run_tests()
             type_result = self._run_type_check()
             lint_result = self._run_lint()

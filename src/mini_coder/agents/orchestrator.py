@@ -736,6 +736,21 @@ Respond with only one word: EXPLORER, PLANNER, CODER, REVIEWER, BASH, GENERAL_PU
             logger.error(f"LLM intent analysis error: {e}", exc_info=True)
             return SubAgentType.GENERAL_PURPOSE  # 兜底
 
+    def _infer_bash_mode(self, intent: str) -> str:
+        """根据意图推断 BASH 的 bash_mode（仅当派发 BASH 且调用方未传入 bash_mode 时使用）。
+
+        质量流水线由用户/Planner/Orchestrator 决策触发，此处为 Orchestrator 在 dispatch 路径下的推断。
+        """
+        intent_lower = (intent or "").strip().lower()
+        # 明确要跑测试/质量报告
+        if any(kw in intent_lower for kw in ["测试", "验证", "质量报告", "run test", "pytest", "mypy", "flake8", "verify", "验证质量"]):
+            return "quality_report"
+        # 写入/保存到本地
+        if any(kw in intent_lower for kw in ["写入本地", "保存到本地", "写入文件", "保存到文件", "把代码写入", "写到本地"]):
+            return "confirm_save"
+        # 默认为单条命令意图（用户可能输入 ls、pytest -k xxx 等）
+        return "single_command"
+
     def _create_subagent(self, agent_type: SubAgentType) -> Any:
         """创建子代理实例
 
@@ -859,11 +874,14 @@ Respond with only one word: EXPLORER, PLANNER, CODER, REVIEWER, BASH, GENERAL_PU
         if isinstance(agent, BaseEnhancedAgent):
             result = agent.execute(intent, stream_callback=stream_callback)
         else:
-            dispatch_context = context or {}
+            dispatch_context = dict(context or {})
             if self._context is not None:
                 wd = self._context.blackboard.get_context("work_dir")
                 if wd is not None:
-                    dispatch_context = {**dispatch_context, "work_dir": str(wd)}
+                    dispatch_context["work_dir"] = str(wd)
+            # 派发 BASH 时若调用方未传 bash_mode，由 Orchestrator 根据 intent 推断（质量流水线由调用方/Orchestrator 决策触发）
+            if agent_type == SubAgentType.BASH and "bash_mode" not in dispatch_context:
+                dispatch_context["bash_mode"] = self._infer_bash_mode(intent)
             result = agent.execute(intent, context=dispatch_context, stream_callback=stream_callback)
 
         # 5. 发送 Agent 完成事件
@@ -892,11 +910,13 @@ Respond with only one word: EXPLORER, PLANNER, CODER, REVIEWER, BASH, GENERAL_PU
         if isinstance(agent, BaseEnhancedAgent):
             result = agent.execute(intent, stream_callback=stream_callback)
         else:
-            dispatch_context = context or {}
+            dispatch_context = dict(context or {})
             if self._context is not None:
                 wd = self._context.blackboard.get_context("work_dir")
                 if wd is not None:
-                    dispatch_context = {**dispatch_context, "work_dir": str(wd)}
+                    dispatch_context["work_dir"] = str(wd)
+            if agent_type == SubAgentType.BASH and "bash_mode" not in dispatch_context:
+                dispatch_context["bash_mode"] = self._infer_bash_mode(intent)
             result = agent.execute(intent, context=dispatch_context, stream_callback=stream_callback)
         self._notify_agent_completed(agent_type, result)
         return result
