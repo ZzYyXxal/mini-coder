@@ -11,6 +11,8 @@ from typing import Dict, List, Optional, Any
 
 from .providers.openai_compatible import OpenAICompatibleProvider
 
+logger = logging.getLogger(__name__)
+
 # Patterns that might confuse the model or indicate commands
 SUSPICIOUS_PATTERNS = [
     r'^/[a-zA-Z]+$',  # Slash commands like /session, /help
@@ -58,6 +60,7 @@ class LLMService:
         self._note_extractor = None
         self._command_tool = None
         self._tools_registry: Dict[str, Any] = {}
+        self._main_agent_prompt_cache: Optional[str] = None
         self._load_config()
         self._init_memory()
         self._init_note_extractor()
@@ -401,12 +404,16 @@ class LLMService:
         Returns:
             AI 响应内容。
         """
+        logger.debug(f"[LLMService] chat() called, message length={len(message)}")
+
         if self.provider is None:
+            logger.error("[LLMService] No LLM provider configured")
             raise ValueError("No LLM provider configured.")
 
         # Validate input
         is_valid, processed_message = self._validate_input(message)
         if not is_valid:
+            logger.warning(f"[LLMService] Input validation failed: {processed_message}")
             return f"[Error] {processed_message}"
 
         # 添加用户消息到上下文
@@ -420,7 +427,57 @@ class LLMService:
         if self._context_manager and response:
             self._context_manager.add_message("assistant", response)
 
+        logger.debug(f"[LLMService] chat() completed, response length={len(response) if response else 0}")
         return response
+
+    def chat_one_shot(self, system_prompt: str, user_message: str, **kwargs) -> str:
+        """一次性 LLM 调用，不写入对话历史。
+
+        用于路由等决策，避免污染主代理的 _context_manager 与 provider 历史。
+
+        Args:
+            system_prompt: 系统提示（如路由规则）。
+            user_message: 用户消息（如当轮用户输入）。
+            **kwargs: 额外请求参数。
+
+        Returns:
+            助手回复的完整文本。
+        """
+        if self.provider is None:
+            logger.error("[LLMService] No LLM provider configured")
+            raise ValueError("No LLM provider configured.")
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_message},
+        ]
+        return self.provider.send_messages_one_shot(messages, **kwargs)
+
+    def _get_main_agent_system_prompt(self) -> str:
+        """加载主代理（Master Agent）系统提示词，与子代理一样从 prompts/system 动态加载。"""
+        if self._main_agent_prompt_cache is not None:
+            return self._main_agent_prompt_cache
+        try:
+            from mini_coder.agents.prompt_loader import PromptLoader
+
+            # 与 config 同级的项目根下的 prompts/system
+            config_dir = Path(self.config_path).resolve().parent
+            prompt_dir = config_dir.parent / "prompts" / "system"
+            if not prompt_dir.exists():
+                prompt_dir = Path("prompts/system")
+            loader = PromptLoader(prompt_dir=str(prompt_dir))
+            prompt = loader.load("main", use_cache=True)
+            self._main_agent_prompt_cache = prompt
+            return prompt
+        except Exception as e:
+            logger.warning("Failed to load main agent prompt from file, using fallback: %s", e)
+            fallback = (
+                "你是 mini-coder 的主代理。简单问题直接回答；"
+                "复杂问题请输出【复杂任务】并拆解子问题、指定子代理（EXPLORER/PLANNER/CODER/REVIEWER/BASH/MINI_CODER_GUIDE/GENERAL_PURPOSE）。"
+                "若需展示推理请用 <thinking>...</thinking> 包裹。"
+            )
+            self._main_agent_prompt_cache = fallback
+            return fallback
 
     def chat_stream(self, message: str, **kwargs):
         """发送消息并获取流式响应。
@@ -439,12 +496,16 @@ class LLMService:
         Yields:
             Dict 包含 type 和 content 字段。
         """
+        logger.debug(f"[LLMService] chat_stream() called, message length={len(message)}")
+
         if self.provider is None:
+            logger.error("[LLMService] No LLM provider configured")
             raise ValueError("No LLM provider configured.")
 
         # 1. Validate - 输入验证
         is_valid, processed_message = self._validate_input(message)
         if not is_valid:
+            logger.warning(f"[LLMService] Stream input validation failed: {processed_message}")
             yield {"type": "error", "content": processed_message}
             return
 
@@ -458,10 +519,12 @@ class LLMService:
 
             # 报告压缩结果
             if compression_stats.get("pruned_tokens", 0) > 0:
+                logger.info(f"[LLMService] Pruned {compression_stats['pruned_tokens']} tokens")
                 yield {"type": "system", "content": f"[已清理 {compression_stats['pruned_tokens']} tokens 的工具输出]"}
 
             if compression_stats.get("compressed_messages", 0) > 0:
                 count = compression_stats["compressed_messages"]
+                logger.info(f"[LLMService] Compressed {count} messages")
                 yield {"type": "system", "content": f"[已压缩 {count} 条消息]"}
 
         # 3. Add - 添加用户消息到上下文
@@ -478,6 +541,9 @@ class LLMService:
                 max_tokens=128000,
                 auto_compress=False  # 已经在步骤2处理过压缩
             )
+            # 主代理 system 提示词与子代理一样动态加载，置于上下文首位
+            main_prompt = self._get_main_agent_system_prompt()
+            context.insert(0, {"role": "system", "content": main_prompt})
 
             # 使用预构建的上下文发送请求
             for chunk in self.provider.send_with_context(context, **kwargs):
@@ -496,6 +562,8 @@ class LLMService:
         # 5. Complete - 添加完整响应到上下文
         if self._context_manager and full_response:
             self._context_manager.add_message("assistant", full_response)
+
+        logger.debug(f"[LLMService] chat_stream() completed, response length={len(full_response)}")
 
         # 6. Auto-extract - 自动提取笔记
         if self._auto_extract_notes and self._note_extractor and full_response:
@@ -584,6 +652,9 @@ class LLMService:
                 max_tokens=128000,
                 auto_compress=False  # 已经在步骤2处理过压缩
             )
+            # 主代理 system 提示词与子代理一样动态加载，置于上下文首位
+            main_prompt = self._get_main_agent_system_prompt()
+            context.insert(0, {"role": "system", "content": main_prompt})
 
             # 使用预构建的上下文发送请求
             for chunk in self.provider.send_with_context(context, **kwargs):
@@ -605,33 +676,6 @@ class LLMService:
 
     def clear_history(self) -> None:
         """清除对话历史。"""
-        # region agent log
-        try:
-            import json
-            import time
-            from pathlib import Path
-
-            log_path = Path("/root/LLM/mini-coder/.cursor/debug-61572a.log")
-            log_entry = {
-                "sessionId": "61572a",
-                "runId": "pre-fix",
-                "hypothesisId": "H3",
-                "location": "src/mini_coder/llm/service.py:604",
-                "message": "LLMService.clear_history called",
-                "data": {
-                    "provider_name": getattr(self, "provider_name", None),
-                    "has_provider": self.provider is not None,
-                    "has_context_manager": getattr(self, "_context_manager", None) is not None,
-                },
-                "timestamp": int(time.time() * 1000),
-            }
-            log_path.parent.mkdir(parents=True, exist_ok=True)
-            with log_path.open("a", encoding="utf-8") as f:
-                f.write(json.dumps(log_entry, ensure_ascii=False) + "\n")
-        except Exception:
-            pass
-        # endregion
-
         if self.provider:
             self.provider.clear_history()
         if getattr(self, '_context_manager', None):

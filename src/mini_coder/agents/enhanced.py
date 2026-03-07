@@ -333,6 +333,16 @@ class AgentCapabilities:
     # 是否需要用户确认才能执行危险操作
     requires_confirmation: bool = False
 
+    def copy(self) -> "AgentCapabilities":
+        """创建副本"""
+        return AgentCapabilities(
+            allowed_tools=self.allowed_tools.copy(),
+            allowed_read_patterns=self.allowed_read_patterns.copy(),
+            allowed_write_patterns=self.allowed_write_patterns.copy(),
+            max_tool_calls=self.max_tool_calls,
+            requires_confirmation=self.requires_confirmation,
+        )
+
 
 class EnhancedAgentState(Enum):
     """Agent 状态"""
@@ -381,11 +391,13 @@ class BaseEnhancedAgent(ABC):
     2. 黑板交互
     3. 事件驱动
     4. 详细的执行统计
+    5. 动态提示词加载（从 prompts/system/*.md）
     """
 
     # 类变量：Agent 类型定义
     AGENT_TYPE: str = "base"
     DEFAULT_CAPABILITIES: AgentCapabilities = AgentCapabilities()
+    DEFAULT_PROMPT_PATH: Optional[str] = None  # 子类覆盖以加载提示词文件
 
     def __init__(
         self,
@@ -410,10 +422,47 @@ class BaseEnhancedAgent(ABC):
         self._state = EnhancedAgentState.IDLE
         self._start_time: Optional[float] = None
 
+        # 提示词加载器（延迟初始化）
+        self._prompt_loader: Optional[Any] = None
+
         # 订阅感兴趣的事件
         self._subscribe_to_events()
 
         logger.info(f"Initialized {self.AGENT_TYPE} agent")
+
+    def _get_prompt_loader(self) -> Any:
+        """获取提示词加载器（延迟初始化）"""
+        if self._prompt_loader is None:
+            from mini_coder.agents.prompt_loader import PromptLoader
+            self._prompt_loader = PromptLoader()
+        return self._prompt_loader
+
+    def _load_system_prompt(self, context: Optional[Dict[str, Any]] = None) -> str:
+        """加载系统提示词
+
+        优先从 DEFAULT_PROMPT_PATH 加载，失败则使用内置提示词。
+
+        Args:
+            context: 用于占位符插值的上下文
+
+        Returns:
+            系统提示词字符串
+        """
+        prompt_path = self.DEFAULT_PROMPT_PATH
+        if prompt_path:
+            try:
+                loader = self._get_prompt_loader()
+                return loader.load(prompt_path, context=context)
+            except Exception as e:
+                logger.warning(f"Failed to load prompt from {prompt_path}: {e}")
+
+        # 返回空字符串，子类应在 _build_*_prompt 中处理
+        return ""
+
+    @property
+    def name(self) -> str:
+        """获取 Agent 名称"""
+        return self.AGENT_TYPE
 
     @property
     def state(self) -> EnhancedAgentState:
@@ -804,16 +853,16 @@ class CodeReviewerAgent(BaseEnhancedAgent):
                 created_by=self.AGENT_TYPE,
             )
 
-            # 5. 发布完成事件
+            # 5. 发布完成事件（与 prompt 结构化输出 [Pass]/[Reject] 一致）
+            passed = self._parse_review_passed(review_result)
             self._emit_event(EventType.AGENT_COMPLETED, {
                 "review_completed": True,
-                "result": "passed" if "通过" in review_result or "✅" in review_result else "rejected"
+                "result": "passed" if passed else "rejected"
             })
 
             self._set_state(EnhancedAgentState.IDLE)
 
             # 6. 根据评审结果设置 success 状态
-            passed = "通过" in review_result or "✅" in review_result
             return self._create_result(
                 success=passed,
                 output=review_result,
@@ -877,8 +926,15 @@ Constraints:
 - Do NOT run tests - only static analysis
 """
 
+    def _parse_review_passed(self, response: str) -> bool:
+        """解析评审结果是否为通过（与 prompt 中 [Pass]/[Reject] 一致）。"""
+        r = response.strip()
+        if "[Reject]" in r or "拒绝" in r:
+            return False
+        return "[Pass]" in r or "通过" in r or "✅" in r
+
     def _parse_review_result(self, response: str) -> str:
-        """解析评审结果"""
+        """解析评审结果（返回原文供报告使用）。"""
         return response
 
 
@@ -911,6 +967,7 @@ class PlannerAgent(BaseEnhancedAgent):
     """
 
     AGENT_TYPE = "planner"
+    DEFAULT_PROMPT_PATH = "subagent-planner"
     DEFAULT_CAPABILITIES = PlannerCapabilities()
 
     def __init__(
@@ -972,22 +1029,26 @@ class PlannerAgent(BaseEnhancedAgent):
         task: str,
         context: Dict
     ) -> str:
-        """构建规划 prompt"""
-        return f"""You are a Planner Agent. Create a detailed implementation plan.
+        """构建规划 prompt
 
-Task: {task}
+        加载系统提示词并追加任务上下文。
+        """
+        # 加载系统提示词（从 prompts/system/subagent-planner.md）
+        system_prompt = self._load_system_prompt()
 
-Shared Context:
-{json.dumps(context.get('shared_context', {}), indent=2)}
+        # 构建任务上下文
+        task_context = f"""
 
-Create a plan with:
-1. Overview of the task
-2. Task breakdown into atomic steps (TDD: test first, then implementation)
-3. Dependencies between steps
-4. Required tools/libraries
-5. Test strategy
+---
 
-Output in markdown format."""
+## 当前任务
+
+任务: {task}
+
+共享上下文:
+{json.dumps(context.get('shared_context', {}), indent=2, ensure_ascii=False)}
+"""
+        return system_prompt + task_context
 
     def _parse_plan(self, response: str) -> str:
         """解析计划"""
@@ -1025,6 +1086,7 @@ class CoderAgent(BaseEnhancedAgent):
     """
 
     AGENT_TYPE = "coder"
+    DEFAULT_PROMPT_PATH = "subagent-coder"
     DEFAULT_CAPABILITIES = CoderCapabilities()
 
     def __init__(
@@ -1104,30 +1166,33 @@ class CoderAgent(BaseEnhancedAgent):
         plan: str,
         existing_code: Dict[str, str]
     ) -> str:
-        """构建编码 prompt"""
+        """构建编码 prompt
+
+        加载系统提示词并追加任务上下文。
+        """
+        # 加载系统提示词（从 prompts/system/subagent-coder.md）
+        system_prompt = self._load_system_prompt()
+
         existing_code_str = "\n\n".join(
             f"File: {name}\n{content}"
             for name, content in existing_code.items()
         )
 
-        return f"""You are a Coder Agent. Implement the following task.
+        task_context = f"""
 
-Task: {task}
+---
 
-Implementation Plan:
+## 当前任务
+
+任务: {task}
+
+实现计划:
 {plan}
 
-Existing Code (if retrying):
-{existing_code_str}
-
-Rules:
-1. TDD: Tests first, then implementation
-2. Type hints for all functions (Python 3.10+)
-3. Google-style docstrings
-4. PEP 8 code style
-5. Handle edge cases
-
-Output complete code files with filenames."""
+已有代码（若是重试）:
+{existing_code_str if existing_code_str else "无"}
+"""
+        return system_prompt + task_context
 
     def _parse_code(self, response: str) -> Dict[str, str]:
         """解析代码文件"""
@@ -1176,6 +1241,7 @@ class TesterAgent(BaseEnhancedAgent):
     """
 
     AGENT_TYPE = "tester"
+    DEFAULT_PROMPT_PATH = "subagent-bash"  # 使用 Bash 提示词（职责相似）
     DEFAULT_CAPABILITIES = TesterCapabilities()
 
     def __init__(

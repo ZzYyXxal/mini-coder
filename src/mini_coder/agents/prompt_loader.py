@@ -5,17 +5,21 @@
 2. 占位符插值（{{identifier}} 语法）
 3. 缓存机制
 4. 内置兜底提示词
+
+继承自 tools.prompt_loader.PromptLoader，添加 Agent 特定功能。
 """
 
 from pathlib import Path
-from typing import Dict, Optional, List
+from typing import Dict, Optional, List, Any
 import logging
+
+from mini_coder.tools.prompt_loader import PromptLoader as BasePromptLoader
 
 logger = logging.getLogger(__name__)
 
 
-class PromptLoader:
-    """提示词加载器 - 实现动态提示词注入
+class PromptLoader(BasePromptLoader):
+    """Agent 提示词加载器 - 继承基础 PromptLoader 并添加 Agent 特定功能
 
     使用示例:
     ```python
@@ -26,117 +30,77 @@ class PromptLoader:
 
     DEFAULT_PROMPT_DIR = "prompts/system"
 
-    def __init__(self, prompt_dir: Optional[str] = None):
+    def __init__(self, prompt_dir: Optional[str] = None, base_dir: Optional[str] = None):
         """初始化提示词加载器
 
         Args:
             prompt_dir: 提示词模板目录路径，默认 prompts/system
+            base_dir: 兼容参数，等同于 prompt_dir
         """
-        self.prompt_dir = Path(prompt_dir or self.DEFAULT_PROMPT_DIR)
-        self._cache: Dict[str, str] = {}
+        # 优先使用 prompt_dir，兼容 base_dir
+        super().__init__(base_dir=prompt_dir or base_dir or self.DEFAULT_PROMPT_DIR)
 
-        # 确保目录存在
-        if not self.prompt_dir.exists():
-            logger.warning(f"Prompt directory does not exist: {self.prompt_dir}")
-
-    def load(self, agent_type: str, context: Optional[Dict] = None) -> str:
+    def load(
+        self,
+        agent_type: str,
+        context: Optional[Dict[str, Any]] = None,
+        use_cache: bool = True,
+    ) -> str:
         """加载并插值提示词
 
+        重写基类方法，支持 Agent 类型名称映射到文件路径。
+
         Args:
-            agent_type: Agent 类型（如 "explorer", "planner", "coder"）
+            agent_type: Agent 类型（如 "explorer", "planner", "coder"）或文件路径
             context: 可选的上下文字典，用于占位符替换
+            use_cache: 是否使用缓存
 
         Returns:
             str: 插值后的提示词
         """
-        # 1. 从缓存或文件读取
-        if agent_type not in self._cache:
-            prompt = self._load_from_file(agent_type)
-            if prompt is None:
-                # 文件不存在，使用内置兜底
-                prompt = self._get_default_prompt(agent_type)
-                if prompt is None:
-                    raise ValueError(f"No prompt found for agent type: {agent_type}")
-            self._cache[agent_type] = prompt
+        # 如果是文件路径格式（包含 / 或 .md），使用基类方法
+        if "/" in agent_type or agent_type.endswith(".md"):
+            return super().load(agent_type, context, use_cache)
 
-        # 2. 占位符替换
-        prompt = self._cache[agent_type]
+        # Agent 类型模式：尝试多个文件命名
+        prompt = self._load_agent_prompt(agent_type, use_cache)
+        if prompt is None:
+            raise ValueError(f"No prompt found for agent type: {agent_type}")
+
+        # 占位符替换
         if context:
             prompt = self._interpolate(prompt, context)
 
         return prompt
 
-    def _load_from_file(self, agent_type: str) -> Optional[str]:
-        """从文件加载提示词
+    def _load_agent_prompt(self, agent_type: str, use_cache: bool) -> Optional[str]:
+        """加载 Agent 提示词
 
         Args:
             agent_type: Agent 类型
+            use_cache: 是否使用缓存
 
         Returns:
-            文件内容，如果文件不存在返回 None
+            提示词字符串，如果找不到返回 None
         """
         # 尝试不同的文件命名模式
         possible_files = [
-            self.prompt_dir / f"subagent-{agent_type}.md",
-            self.prompt_dir / f"{agent_type}.md",
-            self.prompt_dir / f"{agent_type}-agent.md",
+            f"subagent-{agent_type}.md",
+            f"{agent_type}.md",
+            f"{agent_type}-agent.md",
         ]
 
-        for file_path in possible_files:
-            if file_path.exists():
-                logger.debug(f"Loading prompt from: {file_path}")
-                return file_path.read_text(encoding="utf-8")
-
-        return None
-
-    def _get_default_prompt(self, agent_type: str) -> Optional[str]:
-        """获取内置兜底提示词
-
-        Args:
-            agent_type: Agent 类型
-
-        Returns:
-            内置提示词，如果没有则返回 None
-        """
-        defaults = _BUILTIN_PROMPTS.get(agent_type)
-        if defaults is None:
-            logger.warning(f"No built-in prompt for agent type: {agent_type}")
-        return defaults
-
-    def _interpolate(self, prompt: str, context: Dict) -> str:
-        """执行占位符替换
-
-        Args:
-            prompt: 原始提示词
-            context: 上下文字典
-
-        Returns:
-            插值后的提示词
-        """
-        for key, value in context.items():
-            placeholder = f"{{{{{key}}}}}"  # {{key}}
-            prompt = prompt.replace(placeholder, str(value))
-        return prompt
-
-    def clear_cache(self) -> None:
-        """清空缓存"""
-        self._cache.clear()
-        logger.debug("Prompt cache cleared")
-
-    def preload(self, agent_types: Optional[List[str]] = None) -> None:
-        """预加载提示词到缓存
-
-        Args:
-            agent_types: 要预加载的 Agent 类型列表，默认加载所有已知类型
-        """
-        if agent_types is None:
-            agent_types = list(_BUILTIN_PROMPTS.keys())
-
-        for agent_type in agent_types:
+        for file_name in possible_files:
             try:
-                self.load(agent_type)
-            except ValueError:
-                pass  # 忽略没有提示词的类型
+                prompt = super().load(file_name, context=None, use_cache=use_cache)
+                # 检查是否是 fallback prompt（包含 "fallback" 字样）
+                if "This is a fallback prompt" not in prompt:
+                    return prompt
+            except Exception:
+                continue
+
+        # 使用内置兜底提示词
+        return _BUILTIN_PROMPTS.get(agent_type)
 
 
 # ==================== Built-in Default Prompts ====================
@@ -391,4 +355,6 @@ You can use: Read, Glob, Grep, WebSearch, WebFetch
 - Do NOT redesign architecture
 - Do NOT replace ArchitecturalConsultant or Planner
 """,
+
+    "main": """你是 mini-coder 的主代理（Master Agent）。简单问题直接回答；复杂或需专业知识的问题请输出【复杂任务】并拆解子问题、指定子代理（EXPLORER/PLANNER/CODER/REVIEWER/BASH/MINI_CODER_GUIDE/GENERAL_PURPOSE）。若需展示推理请用 <thinking>...</thinking> 包裹，最终回答在标签外。""",
 }
