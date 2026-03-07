@@ -1031,10 +1031,12 @@ class PlannerAgent(BaseEnhancedAgent):
     ) -> str:
         """构建规划 prompt
 
-        加载系统提示词并追加任务上下文。
+        加载系统提示词并追加任务上下文；注入 work_dir 供 {{work_dir}} 占位符替换。
         """
+        work_dir = (self.blackboard.get_context("work_dir") or "").strip()
+        prompt_context = {"work_dir": work_dir or "（未设置）"}
         # 加载系统提示词（从 prompts/system/subagent-planner.md）
-        system_prompt = self._load_system_prompt()
+        system_prompt = self._load_system_prompt(context=prompt_context)
 
         # 构建任务上下文
         task_context = f"""
@@ -1168,10 +1170,13 @@ class CoderAgent(BaseEnhancedAgent):
     ) -> str:
         """构建编码 prompt
 
-        加载系统提示词并追加任务上下文。
+        加载系统提示词并追加任务上下文；注入 work_dir 使模型使用真实项目路径。
         """
-        # 加载系统提示词（从 prompts/system/subagent-coder.md）
-        system_prompt = self._load_system_prompt()
+        work_dir = (self.blackboard.get_context("work_dir") or "").strip()
+        prompt_context = {"work_dir": work_dir or "<未设置，请使用相对路径如 calculator.py>"}
+
+        # 加载系统提示词（从 prompts/system/subagent-coder.md），注入 {{work_dir}}
+        system_prompt = self._load_system_prompt(context=prompt_context)
 
         existing_code_str = "\n\n".join(
             f"File: {name}\n{content}"
@@ -1188,6 +1193,8 @@ class CoderAgent(BaseEnhancedAgent):
 
 实现计划:
 {plan}
+
+**项目根目录（所有文件路径必须基于此，禁止使用 /home/user 等占位路径）**: {work_dir or "（未设置）"}
 
 已有代码（若是重试）:
 {existing_code_str if existing_code_str else "无"}

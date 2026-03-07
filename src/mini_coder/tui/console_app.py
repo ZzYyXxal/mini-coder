@@ -6,6 +6,7 @@ using Rich Console for output and handling user input directly.
 
 import asyncio
 import io
+import json
 import logging
 import signal
 import sys
@@ -13,7 +14,7 @@ import time
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Literal, Optional, Tuple, TypedDict
 
 from rich.console import Console
 from rich.markdown import Markdown
@@ -144,6 +145,7 @@ class MiniCoderConsole:
 
         # Agent callback support
         self._orchestrator = None  # Will be set when orchestrator is created
+        self._tui_task_id = f"tui-session-{int(time.time())}"
 
         # 非 TTY 时从 /dev/tty 读入，避免 stdin 为管道时执行一次命令后 readline() 即 EOF 导致直接退出
         self._repl_input_stream = None  # 在 run() 中按 is_tty 设置
@@ -406,6 +408,8 @@ class MiniCoderConsole:
                 config=WorkflowConfig(),
                 command_executor=None,
             )
+            # 交互式会话：创建可复用上下文，确保 TUI 跨轮共享 Blackboard
+            self._orchestrator.ensure_interactive_context(task_id=self._tui_task_id)
             self.register_agent_callback(self._orchestrator)
             logging.info("Orchestrator created and callbacks registered for TUI")
         except Exception as e:
@@ -413,6 +417,108 @@ class MiniCoderConsole:
             self._orchestrator = None
             return False
         return True
+
+    def _set_orchestrator_work_dir(self) -> None:
+        """将当前工作目录写入 orchestrator blackboard，供 Coder 等子代理使用真实路径。"""
+        if self._orchestrator is None:
+            return
+        ctx = getattr(self._orchestrator, "_context", None)
+        if ctx is None:
+            return
+        work_dir = getattr(self, "_working_directory", None) or getattr(
+            self, "working_directory", None
+        )
+        if work_dir is not None:
+            ctx.blackboard.set_context("work_dir", str(work_dir))
+
+    class _RouteDecision(TypedDict, total=False):
+        route: Literal["main", "dispatch", "workflow"]
+        agent: Literal[
+            "EXPLORER",
+            "PLANNER",
+            "CODER",
+            "REVIEWER",
+            "BASH",
+            "GENERAL_PURPOSE",
+            "MINI_CODER_GUIDE",
+        ]
+        confidence: float
+        reason: str
+
+    # 路由用 system 提示，与主对话隔离，不写入 _context_manager
+    _ROUTER_SYSTEM = (
+        "你是一个路由器，只负责根据用户输入决定：由主代理直接回答，还是派发到哪个子代理，或进入多阶段工作流。\n"
+        "要求：\n"
+        "- 只输出一行 JSON，禁止输出除 JSON 以外的任何字符。\n"
+        "- JSON 字段：\n"
+        '  - route: "main" | "dispatch" | "workflow"\n'
+        '  - agent: "EXPLORER"|"PLANNER"|"CODER"|"REVIEWER"|"BASH"|"GENERAL_PURPOSE"|"MINI_CODER_GUIDE"（仅当 route=dispatch 时必填）\n'
+        "  - confidence: 0~1\n"
+        "  - reason: 简短中文原因\n"
+        "路由规则（简述）：\n"
+        '- "main": 闲聊/解释性问答，不需要工具、不需要改代码。\n'
+        '- "dispatch": 明确需要某一类子代理能力（探索/规划/实现/评审/运行测试/指南）。\n'
+        '- "workflow": 用户明确要“从需求到实现到测试”的完整闭环，或需要多步骤连续执行（规划→实现→测试/验证）。\n'
+        "只输出一行 JSON，不要其他字符。"
+    )
+
+    def _route_by_heuristic(self, user_input: str) -> Optional["_RouteDecision"]:
+        """扩展路由启发式：仅对「几乎不会误判」的输入直接返回 route=main，避免路由 LLM 调用。
+
+        可靠性原则：宁可多走一次路由 LLM（仅多 1～5s），也不把本该派发/工作流的请求误判成主代理直答。
+        因此只做「寒暄、致谢/告别、极短确认」等明确场景；不含歧义短句（如「如何优化」可能是解释也可能是派 CODER）。
+        未命中返回 None，交给 LLM 路由。
+        """
+        s = user_input.strip()
+        if not s:
+            return None
+        low = s.lower()
+
+        # 1. 寒暄（几乎不会误判）
+        if low in {"hi", "hello", "你好", "在吗", "嗨"} or (
+            len(s) <= 4 and any(x in low for x in ("你好", "hi"))
+        ):
+            return {"route": "main", "confidence": 0.9, "reason": "简单寒暄，主代理可直接回复"}
+
+        # 2. 致谢 / 告别 / 极短确认（主代理即可回复，不会与「派发/工作流」混淆）
+        if low in {
+            "谢谢", "感谢", "多谢", "再见", "bye", "好的", "ok", "okay",
+            "好", "行", "可以", "嗯", "对", "是", "收到", "知道了", "明白了",
+            "好哒", "好的呀", "没问题",
+        }:
+            return {"route": "main", "confidence": 0.85, "reason": "致谢/告别/确认，主代理可直接回复"}
+
+        # 不在此处做「短句纯问答」等歧义规则，避免该路由时不路由（如「如何优化」可能指派 CODER）
+        return None
+
+    def _route_user_input(self, user_input: str) -> "_RouteDecision":
+        """用 LLM 生成结构化路由决策（主代理直答 vs 子代理派发 vs 工作流）。"""
+        # 扩展启发式：命中则直接走主代理，避免路由 LLM 调用
+        heuristic = self._route_by_heuristic(user_input)
+        if heuristic is not None:
+            return heuristic
+
+        if not self._ensure_llm_service():
+            return {"route": "dispatch", "confidence": 0.0, "reason": "LLM 服务不可用，回退到 dispatch"}
+
+        try:
+            # 一次性调用，不写入主对话历史，避免主 agent 看到“路由器”上下文
+            t_route_start = time.perf_counter()
+            raw = self._llm_service.chat_one_shot(
+                self._ROUTER_SYSTEM,
+                user_input,
+            ).strip()
+            logging.debug(
+                "[TUI] _route_user_input: chat_one_shot latency=%.3fs",
+                time.perf_counter() - t_route_start,
+            )
+            decision = json.loads(raw)
+            if not isinstance(decision, dict):
+                raise ValueError("route decision is not a dict")
+            return decision
+        except Exception as e:
+            logging.warning("Route decision parse failed; fallback to dispatch: %s", e)
+            return {"route": "dispatch", "confidence": 0.0, "reason": "路由解析失败，回退到 dispatch"}
 
     # Loop detection constants
     MAX_RESPONSE_LENGTH = 50000  # Maximum characters in a single response
@@ -486,9 +592,12 @@ class MiniCoderConsole:
         return "，".join(parts)
 
     def _call_orchestrator_dispatch_and_display(
-        self, user_input: str
+        self, user_input: str, forced_agent: Optional[str] = None
     ) -> Tuple[bool, Optional[float], Optional[float]]:
         """经 WorkflowOrchestrator 派发子 agent 执行并展示结果，用于 TUI 下 agent 流转与 /agents 记录。
+
+        注意：子 agent（如 Coder）内部使用 chat() 非流式调用，故此处仅展示最终 summary，
+        无逐字流式输出；流式仅在 route=main 且 _call_llm_stream_and_display 时生效。
 
         Returns:
             (是否成功得到有效输出, 本次总耗时秒数, 首字耗时；非流式固定为 None)
@@ -497,7 +606,13 @@ class MiniCoderConsole:
             return (False, None, None)
         t_start = time.perf_counter()
         try:
-            result = self._orchestrator.dispatch(user_input)
+            if forced_agent:
+                from mini_coder.agents.orchestrator import SubAgentType
+
+                agent_type = SubAgentType[forced_agent]
+                result = self._orchestrator.dispatch_with_agent(agent_type, user_input)
+            else:
+                result = self._orchestrator.dispatch(user_input)
         except Exception as e:
             logging.exception("Orchestrator dispatch failed: %s", e)
             duration_sec = time.perf_counter() - t_start
@@ -512,6 +627,82 @@ class MiniCoderConsole:
         if not ok and error:
             self._console.print(Panel(f"[red]{error}[/red]", title="错误", border_style="red"))
         return (ok, duration_sec, None)
+
+    def _call_orchestrator_workflow_and_display(
+        self, user_input: str
+    ) -> Tuple[bool, Optional[float], Optional[float]]:
+        """执行多阶段工作流（主代理依次调用子代理），并展示结果。"""
+        if self._orchestrator is None:
+            return (False, None, None)
+        t_start = time.perf_counter()
+        try:
+            # 复用 TUI 会话的 task_id/Blackboard，确保跨轮共享工件
+            result = self._orchestrator.execute_workflow(user_input, task_id=self._tui_task_id)
+        except Exception as e:
+            logging.exception("Orchestrator workflow failed: %s", e)
+            duration_sec = time.perf_counter() - t_start
+            self._console.print(f"[red]工作流失败: {e}[/red]")
+            return (False, duration_sec, None)
+        duration_sec = time.perf_counter() - t_start
+        ok = getattr(result, "success", False)
+        output = getattr(result, "output", "") or ""
+        error = getattr(result, "error", "") or ""
+        if output:
+            self._console.print(Markdown(output))
+        if not ok and error:
+            self._console.print(Panel(f"[red]{error}[/red]", title="错误", border_style="red"))
+        return (ok, duration_sec, None)
+
+    # 思考段标签，用于流式解析并红色框显
+    _TAG_THINKING_OPEN = "<thinking>"
+    _TAG_THINKING_CLOSE = "</thinking>"
+
+    def _parse_thinking_buffer(
+        self,
+        buffer: str,
+        in_thinking: bool,
+    ) -> Tuple[str, str, str, bool]:
+        """解析 buffer 中的 <thinking> / </thinking>，返回 (普通文本, 红色文本, 剩余 buffer, 是否在 thinking 内)。
+
+        跨 chunk 时保留可能未完整的标签在 buffer 中。
+        """
+        normal_parts: List[str] = []
+        red_parts: List[str] = []
+        tag_open = self._TAG_THINKING_OPEN
+        tag_close = self._TAG_THINKING_CLOSE
+
+        while True:
+            if not in_thinking:
+                idx = buffer.find(tag_open)
+                if idx != -1:
+                    normal_parts.append(buffer[:idx])
+                    red_parts.append(tag_open)
+                    buffer = buffer[idx + len(tag_open) :]
+                    in_thinking = True
+                    continue
+                # 可能末尾是标签前缀，保留
+                keep = len(tag_open) - 1
+                if len(buffer) > keep:
+                    normal_parts.append(buffer[: -keep] if keep else buffer)
+                    buffer = buffer[-keep:] if keep else ""
+                break
+            else:
+                idx = buffer.find(tag_close)
+                if idx != -1:
+                    red_parts.append(buffer[:idx])
+                    red_parts.append(tag_close)
+                    buffer = buffer[idx + len(tag_close) :]
+                    in_thinking = False
+                    continue
+                keep = len(tag_close) - 1
+                if len(buffer) > keep:
+                    red_parts.append(buffer[: -keep] if keep else buffer)
+                    buffer = buffer[-keep:] if keep else ""
+                break
+
+        normal_str = "".join(normal_parts)
+        red_str = "".join(red_parts)
+        return (normal_str, red_str, buffer, in_thinking)
 
     def _call_llm_stream_and_display(
         self, user_input: str
@@ -537,6 +728,8 @@ class MiniCoderConsole:
             first = True
             full_response = ""
             loop_detected = False
+            think_buffer = ""
+            in_thinking = False
 
             for event in self._llm_service.chat_stream(user_input):
                 if event.get("type") == "delta":
@@ -557,11 +750,25 @@ class MiniCoderConsole:
                             logging.warning("LLM response interrupted due to loop detection")
                             break
 
-                        self._console.print(content, end="")
+                        # 解析 <thinking>...</thinking>，红色框显思考段
+                        think_buffer += content
+                        normal_str, red_str, think_buffer, in_thinking = self._parse_thinking_buffer(
+                            think_buffer, in_thinking
+                        )
+                        if normal_str:
+                            self._console.print(normal_str, end="")
+                        if red_str:
+                            self._console.print(red_str, end="", style="red")
                         if getattr(self._console, "file", None) is not None:
                             self._console.file.flush()
                         first = False
 
+            # 流结束：剩余 buffer 按当前状态输出
+            if think_buffer:
+                if in_thinking:
+                    self._console.print(think_buffer, end="", style="red")
+                else:
+                    self._console.print(think_buffer, end="")
             self._console.print()
 
             if loop_detected:
@@ -869,7 +1076,8 @@ class MiniCoderConsole:
             result: EnhancedAgentResult (only for completed events)
         """
         agent_display = AgentDisplay.from_agent_type(agent_type)
-        timestamp = asyncio.get_event_loop().time() if asyncio.get_event_loop().running() else 0
+        loop = asyncio.get_event_loop()
+        timestamp = loop.time() if loop.is_running() else 0
 
         if event_type == "started":
             self._ui_state.current_agent = agent_display
@@ -1063,16 +1271,37 @@ class MiniCoderConsole:
                 self._display_thinking("Processing your request...")
                 self._console.print()
 
-                # 优先经 orchestrator 派发，以便记录 agent 流转并在 /agents 中展示
-                use_orchestrator = self._ensure_orchestrator()
-                if use_orchestrator:
-                    ok, duration_sec, duration_to_first_sec = self._call_orchestrator_dispatch_and_display(
-                        user_input
-                    )
-                else:
+                # 路由：主代理直答 vs 子代理派发 vs 多阶段工作流
+                t_before_route = time.perf_counter()
+                decision = self._route_user_input(user_input)
+                route = decision.get("route") or "dispatch"
+                logging.debug(
+                    "[TUI] route decision total=%.3fs, route=%s",
+                    time.perf_counter() - t_before_route,
+                    route,
+                )
+
+                if route == "main":
                     ok, duration_sec, duration_to_first_sec = self._call_llm_stream_and_display(
                         user_input
                     )
+                else:
+                    use_orchestrator = self._ensure_orchestrator()
+                    # 派发前注入工作目录，供 Coder 等子代理使用真实路径（避免模型输出 /home/user/...）
+                    self._set_orchestrator_work_dir()
+                    if not use_orchestrator:
+                        ok, duration_sec, duration_to_first_sec = self._call_llm_stream_and_display(
+                            user_input
+                        )
+                    elif route == "workflow":
+                        ok, duration_sec, duration_to_first_sec = self._call_orchestrator_workflow_and_display(
+                            user_input
+                        )
+                    else:
+                        forced_agent = decision.get("agent")
+                        ok, duration_sec, duration_to_first_sec = self._call_orchestrator_dispatch_and_display(
+                            user_input, forced_agent=forced_agent
+                        )
 
                 self._console.print()
                 if not ok:

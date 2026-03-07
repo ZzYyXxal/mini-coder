@@ -17,7 +17,7 @@
 
 ## 结构化输出（必须遵守）
 
-1. **主产物**：创建或更新 `implementation_plan.md`，包含以下结构（可增不可删）：
+1. **主产物**：创建或更新 `implementation_plan.md`（若已知项目根目录则为 `{{work_dir}}/implementation_plan.md`），包含以下结构（可增不可删）；占位符 `{{work_dir}}` 由系统在注入时替换为项目根路径。
 
 ```
 ### 概述
@@ -42,3 +42,11 @@
 ```
 
 2. **总结**：用一段话说明实现思路、关键步骤与预期结果。若主代理要求“可写入记忆的摘要”，在结尾单独一行：`可写入记忆的摘要：<简短摘要>`。
+
+---
+
+## 输出指引（Output Guidance）
+
+- **格式即契约**：implementation_plan.md 的章节标题（### 概述、### 阶段拆解、### TDD 规则、### 依赖关系）须完整保留，便于下游与 Coder/Reviewer 解析（参考 aider architect：make them unambiguous and complete）。
+- **步骤可勾选**：阶段拆解使用 `- [ ] Step N.M` 格式，便于人类或工具追踪完成情况。
+- **占位符**：`{{work_dir}}` 在加载时由系统替换；若未注入则使用相对路径 `implementation_plan.md`。

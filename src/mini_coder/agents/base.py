@@ -429,7 +429,8 @@ Report findings: files/code locations discovered, key conclusions, relevance to 
 
         try:
             user_prompt = self._build_explorer_prompt(task, context or {})
-            response = self._invoke_llm(user_prompt)
+            # 传入 _prompt_context 以便加载系统提示时替换 {{work_dir}} 等占位符
+            response = self._invoke_llm(user_prompt, _prompt_context=context or {})
 
             self.state.is_busy = False
 

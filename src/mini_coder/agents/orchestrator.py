@@ -98,15 +98,17 @@ logger = logging.getLogger(__name__)
 
 
 class SubAgentType(Enum):
-    """子代理类型枚举"""
-    EXPLORER = "explorer"
-    PLANNER = "planner"
-    CODER = "coder"
-    REVIEWER = "reviewer"
-    BASH = "bash"
-    TESTER = "tester"  # Test execution and quality verification
-    GENERAL_PURPOSE = "general_purpose"  # Fast read-only search
-    MINI_CODER_GUIDE = "mini_coder_guide"  # Mini-coder usage guide
+    """子代理类型枚举
+
+    与 prompts/system/main-agent.md 中定义的子代理列表保持一致。
+    """
+    EXPLORER = "explorer"          # 只读探索
+    PLANNER = "planner"            # TDD 规划
+    CODER = "coder"                # 代码实现
+    REVIEWER = "reviewer"          # 代码评审
+    BASH = "bash"                  # 终端执行与测试验证
+    MINI_CODER_GUIDE = "mini_coder_guide"  # Mini-coder 使用指南
+    GENERAL_PURPOSE = "general_purpose"    # 通用只读分析
 
 
 class IntentResult:
@@ -158,7 +160,7 @@ class WorkflowConfig:
     verbose: bool = False
     # 并行调度配置
     max_agent_concurrency: int = DEFAULT_MAX_CONCURRENCY
-    max_tool_concurrency: int = DEFAULT_MAX_CONCURRENCY
+    # Tool 级并发由 ToolScheduler 独立管理
 
 
 @dataclass
@@ -315,9 +317,11 @@ class WorkflowOrchestrator:
         # 并行调度器
         self._scheduler = ParallelScheduler(
             max_agent_concurrency=self.config.max_agent_concurrency,
-            max_tool_concurrency=self.config.max_tool_concurrency,
             default_agent_timeout=self.config.timeout_seconds,
         )
+
+        # Tool 调度器（独立实例）
+        self._tool_scheduler = None  # 延迟初始化
 
         # 状态回调
         self._state_callbacks: Dict[WorkflowState, List[Callable]] = {
@@ -779,12 +783,6 @@ Respond with only one word: EXPLORER, PLANNER, CODER, REVIEWER, BASH, GENERAL_PU
             return GeneralPurposeAgent(self.llm_service)
         elif agent_type == SubAgentType.MINI_CODER_GUIDE:
             return MiniCoderGuideAgent(self.llm_service)
-        elif agent_type == SubAgentType.TESTER:
-            return TesterAgent(
-                self.llm_service,
-                blackboard=blackboard,
-                event_callback=agent_event_callback,
-            )
         else:
             raise ValueError(f"Unknown agent type: {agent_type}")
 
@@ -832,12 +830,16 @@ Respond with only one word: EXPLORER, PLANNER, CODER, REVIEWER, BASH, GENERAL_PU
         # 3. 创建子代理
         agent = self._create_subagent(agent_type)
 
-        # 4. 执行任务
+        # 4. 执行任务（base 系 agent 需传入含 work_dir 的 context，供提示词 {{work_dir}} 替换）
         if isinstance(agent, BaseEnhancedAgent):
-            # Enhanced 系子代理 execute(task) 不接受 context 参数
             result = agent.execute(intent)
         else:
-            result = agent.execute(intent, context=context)
+            dispatch_context = context or {}
+            if self._context is not None:
+                wd = self._context.blackboard.get_context("work_dir")
+                if wd is not None:
+                    dispatch_context = {**dispatch_context, "work_dir": str(wd)}
+            result = agent.execute(intent, context=dispatch_context)
 
         # 5. 发送 Agent 完成事件
         self._notify_agent_completed(agent_type, result)
@@ -864,7 +866,12 @@ Respond with only one word: EXPLORER, PLANNER, CODER, REVIEWER, BASH, GENERAL_PU
         if isinstance(agent, BaseEnhancedAgent):
             result = agent.execute(intent)
         else:
-            result = agent.execute(intent, context=context)
+            dispatch_context = context or {}
+            if self._context is not None:
+                wd = self._context.blackboard.get_context("work_dir")
+                if wd is not None:
+                    dispatch_context = {**dispatch_context, "work_dir": str(wd)}
+            result = agent.execute(intent, context=dispatch_context)
         self._notify_agent_completed(agent_type, result)
         return result
 
@@ -994,11 +1001,8 @@ Respond with only one word: EXPLORER, PLANNER, CODER, REVIEWER, BASH, GENERAL_PU
         status = self._scheduler.get_status()
         return {
             "running_agents": status.running_agents,
-            "running_tools": status.running_tools,
             "waiting_agents": status.waiting_agents,
-            "waiting_tools": status.waiting_tools,
             "max_agent_concurrency": status.max_agent_concurrency,
-            "max_tool_concurrency": status.max_tool_concurrency,
         }
 
     def cancel_all_tasks(self) -> int:

@@ -17,7 +17,7 @@
 
 ## 结构化输出（必须严格遵守）
 
-仅可输出以下两种之一：
+**仅可输出以下两种之一**，不得出现“部分通过”或无 [Pass]/[Reject] 的模糊结论。
 
 **通过：**
 ```
@@ -34,4 +34,10 @@
 （按严重程度排序，每条必须含文件:行号与建议）
 ```
 
-不可输出“部分通过”或无 [Pass]/[Reject] 的模糊结论。
+---
+
+## 输出指引（Output Guidance）
+
+- **二元结论**：只输出 [Pass] 或 [Reject] 其一；若存在需修复项则必须 [Reject]（参考 feature-dev code-reviewer：confidence-based filtering，只报告高置信度问题）。
+- **可操作**：每条 [Reject] 项须包含：文件绝对路径、行号、问题描述、具体修复建议，便于 Coder 直接修改（参考 code-reviewer：Structure your response for maximum actionability）。
+- **严重程度**：拒绝时按严重程度排序（如 Critical 优先、Important 其次），同一项用 [架构|质量|风格] 标注类别。
