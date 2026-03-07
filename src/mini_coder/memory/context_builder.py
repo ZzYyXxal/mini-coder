@@ -145,6 +145,28 @@ class ContextBuilder:
 
         return context, stats
 
+    def run_compression_if_needed(self) -> dict:
+        """仅执行 Plan B 压缩（prune + 必要时 compress），不构建 context；用于与 build_with_user_message 配合，避免重复 build。
+
+        返回与 build_with_compression 相同的 stats 结构，便于调用方展示「已清理/已压缩」提示。
+        """
+        stats = {
+            "pruned_tokens": 0,
+            "compressed_messages": 0,
+            "tokens_saved": 0,
+            "compression_triggered": False,
+        }
+        if self._manager.should_compress():
+            stats["compression_triggered"] = True
+            pruned = self._manager.prune_tool_outputs()
+            stats["pruned_tokens"] = pruned
+            if self._manager.should_compress():
+                summary = self._manager.compress()
+                if summary:
+                    stats["compressed_messages"] = len(summary.original_message_ids)
+                    stats["tokens_saved"] = summary.metadata.get("tokens_saved", 0)
+        return stats
+
     def _gather(
         self,
         include_project_memory: bool,

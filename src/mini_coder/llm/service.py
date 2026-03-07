@@ -6,6 +6,7 @@
 
 import logging
 import re
+import time
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 
@@ -86,12 +87,18 @@ class LLMService:
                 if not api_key:
                     api_key = provider_config.get('api_key', '')
 
-                # 创建统一的 OpenAI 兼容提供商
+                # 创建统一的 OpenAI 兼容提供商（timeout 为读超时秒数，长上下文建议 ≥120）
+                timeout = provider_config.get('timeout', 120)
+                if isinstance(timeout, (int, float)):
+                    timeout = float(timeout)
+                else:
+                    timeout = 120.0
                 self.provider = OpenAICompatibleProvider(
                     api_key=api_key,
                     base_url=provider_config.get('base_url', ''),
                     model=provider_config.get('model', ''),
                     system_prompt="你是一个简洁、有用的 AI 助手。请直接给出答案，不要在回复中展示思考过程。思考应该在内部完成。",
+                    timeout=timeout,
                 )
 
         except FileNotFoundError:
@@ -103,6 +110,7 @@ class LLMService:
                 base_url="https://open.bigmodel.cn/api/paas/v4/",
                 model="glm-5",
                 system_prompt="你是一个简洁、有用的 AI 助手。请直接给出答案，不要在回复中展示思考过程。思考应该在内部完成。",
+                timeout=120.0,
             )
 
     def _init_memory(self) -> None:
@@ -404,7 +412,10 @@ class LLMService:
         Returns:
             AI 响应内容。
         """
-        logger.debug(f"[LLMService] chat() called, message length={len(message)}")
+        logger.debug("[LLMService] chat() called, message length=%s", len(message))
+        if logger.isEnabledFor(logging.DEBUG):
+            _preview = (message[:500] + "...") if len(message) > 500 else message
+            logger.debug("[LLM REQ] (preview) %s", _preview[:400] + "..." if len(_preview) > 400 else _preview)
 
         if self.provider is None:
             logger.error("[LLMService] No LLM provider configured")
@@ -427,7 +438,10 @@ class LLMService:
         if self._context_manager and response:
             self._context_manager.add_message("assistant", response)
 
-        logger.debug(f"[LLMService] chat() completed, response length={len(response) if response else 0}")
+        logger.debug("[LLMService] chat() completed, response length=%s", len(response) if response else 0)
+        if logger.isEnabledFor(logging.DEBUG) and response:
+            _rpreview = (response[:600] + "...") if len(response) > 600 else response
+            logger.debug("[LLM RSP] (preview) %s", _rpreview[:500] + "..." if len(_rpreview) > 500 else _rpreview)
         return response
 
     def chat_one_shot(self, system_prompt: str, user_message: str, **kwargs) -> str:
@@ -496,7 +510,11 @@ class LLMService:
         Yields:
             Dict 包含 type 和 content 字段。
         """
-        logger.debug(f"[LLMService] chat_stream() called, message length={len(message)}")
+        t_stream_start = time.perf_counter()
+        logger.debug("[LLMService] chat_stream() called, message length=%s", len(message))
+        if logger.isEnabledFor(logging.DEBUG):
+            _preview = (message[:500] + "...") if len(message) > 500 else message
+            logger.debug("[LLM REQ stream] (preview) %s", _preview[:400] + "..." if len(_preview) > 400 else _preview)
 
         if self.provider is None:
             logger.error("[LLMService] No LLM provider configured")
@@ -509,15 +527,17 @@ class LLMService:
             yield {"type": "error", "content": processed_message}
             return
 
-        # 2. Pre-check (GSSC) - 使用 ContextBuilder 进行压缩和上下文构建
+        # 2. Pre-check (GSSC) - 仅触发 Plan B 压缩并收集统计，不在此处构建 context（合并为一次 build，见步骤 4）
         compression_stats = {}
         if self._context_builder:
-            # 使用 build_with_compression 触发 Plan B 压缩
-            _, compression_stats = self._context_builder.build_with_compression(
-                max_tokens=128000
+            t_before_compression = time.perf_counter()
+            compression_stats = self._context_builder.run_compression_if_needed()
+            logger.debug(
+                "[LLMService] chat_stream latency: run_compression_if_needed=%.3fs",
+                time.perf_counter() - t_before_compression,
             )
 
-            # 报告压缩结果
+            # 报告压缩结果（与原先 build_with_compression 的统计一致）
             if compression_stats.get("pruned_tokens", 0) > 0:
                 logger.info(f"[LLMService] Pruned {compression_stats['pruned_tokens']} tokens")
                 yield {"type": "system", "content": f"[已清理 {compression_stats['pruned_tokens']} tokens 的工具输出]"}
@@ -536,6 +556,7 @@ class LLMService:
 
         if self._context_builder:
             # 使用 ContextBuilder 构建完整的上下文（包括用户消息）
+            t_before_build_ctx = time.perf_counter()
             context = self._context_builder.build_with_user_message(
                 user_message=processed_message,
                 max_tokens=128000,
@@ -544,6 +565,11 @@ class LLMService:
             # 主代理 system 提示词与子代理一样动态加载，置于上下文首位
             main_prompt = self._get_main_agent_system_prompt()
             context.insert(0, {"role": "system", "content": main_prompt})
+            logger.debug(
+                "[LLMService] chat_stream latency: build_with_user_message+prompt=%.3fs, total_before_request=%.3fs",
+                time.perf_counter() - t_before_build_ctx,
+                time.perf_counter() - t_stream_start,
+            )
 
             # 使用预构建的上下文发送请求
             for chunk in self.provider.send_with_context(context, **kwargs):
@@ -563,7 +589,10 @@ class LLMService:
         if self._context_manager and full_response:
             self._context_manager.add_message("assistant", full_response)
 
-        logger.debug(f"[LLMService] chat_stream() completed, response length={len(full_response)}")
+        logger.debug("[LLMService] chat_stream() completed, response length=%s", len(full_response))
+        if logger.isEnabledFor(logging.DEBUG) and full_response:
+            _rpreview = (full_response[:600] + "...") if len(full_response) > 600 else full_response
+            logger.debug("[LLM RSP stream] (preview) %s", _rpreview[:500] + "..." if len(_rpreview) > 500 else _rpreview)
 
         # 6. Auto-extract - 自动提取笔记
         if self._auto_extract_notes and self._note_extractor and full_response:
@@ -622,15 +651,11 @@ class LLMService:
             yield {"type": "error", "content": processed_message}
             return
 
-        # 2. Pre-check (GSSC) - 使用 ContextBuilder 进行压缩和上下文构建
+        # 2. Pre-check (GSSC) - 仅触发 Plan B 压缩并收集统计，不在此处构建 context
         compression_stats = {}
         if self._context_builder:
-            # 使用 build_with_compression 触发 Plan B 压缩
-            _, compression_stats = self._context_builder.build_with_compression(
-                max_tokens=128000
-            )
+            compression_stats = self._context_builder.run_compression_if_needed()
 
-            # 报告压缩结果
             if compression_stats.get("pruned_tokens", 0) > 0:
                 yield {"type": "system", "content": f"[已清理 {compression_stats['pruned_tokens']} tokens 的工具输出]"}
 
@@ -642,15 +667,14 @@ class LLMService:
         if self._context_manager:
             self._context_manager.add_message("user", processed_message)
 
-        # 4. Stream - 使用 GSSC 构建的上下文获取流式响应
+        # 4. Stream - 使用 GSSC 构建的上下文获取流式响应（仅此一次 build）
         full_response = ""
 
         if self._context_builder:
-            # 使用 ContextBuilder 构建完整的上下文（包括用户消息）
             context = self._context_builder.build_with_user_message(
                 user_message=processed_message,
                 max_tokens=128000,
-                auto_compress=False  # 已经在步骤2处理过压缩
+                auto_compress=False  # 已在步骤 2 执行过压缩
             )
             # 主代理 system 提示词与子代理一样动态加载，置于上下文首位
             main_prompt = self._get_main_agent_system_prompt()
