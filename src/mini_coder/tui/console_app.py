@@ -446,19 +446,27 @@ class MiniCoderConsole:
         reason: str
 
     # 路由用 system 提示，与主对话隔离，不写入 _context_manager
+    # 各子 agent 职责写清，便于区分 BASH（执行命令）与 CODER（写代码/编辑内容），参考 Claude Code bash command 语义
     _ROUTER_SYSTEM = (
         "你是一个路由器，只负责根据用户输入决定：由主代理直接回答，还是派发到哪个子代理，或进入多阶段工作流。\n"
         "要求：\n"
         "- 只输出一行 JSON，禁止输出除 JSON 以外的任何字符。\n"
         "- JSON 字段：\n"
         '  - route: "main" | "dispatch" | "workflow"\n'
-        '  - agent: "EXPLORER"|"PLANNER"|"CODER"|"REVIEWER"|"BASH"|"GENERAL_PURPOSE"|"MINI_CODER_GUIDE"（仅当 route=dispatch 时必填）\n'
+        '  - agent: 仅当 route=dispatch 时必填，取值见下\n'
         "  - confidence: 0~1\n"
         "  - reason: 简短中文原因\n"
-        "路由规则（简述）：\n"
+        "路由规则：\n"
         '- "main": 闲聊/解释性问答，不需要工具、不需要改代码。\n'
-        '- "dispatch": 明确需要某一类子代理能力（探索/规划/实现/评审/运行测试/指南）。\n'
-        '- "workflow": 用户明确要“从需求到实现到测试”的完整闭环，或需要多步骤连续执行（规划→实现→测试/验证）。\n'
+        '- "dispatch": 需要派发到下列某一子代理，按职责选 agent：\n'
+        "  - EXPLORER: 只读探索代码库（找文件、看结构、理解依赖），不写代码不执行命令。\n"
+        "  - PLANNER: 需求分析、任务拆解、TDD 规划、写 implementation_plan.md。\n"
+        "  - CODER: 编写或编辑代码/文件内容（实现功能、新建或修改源文件）。\n"
+        "  - REVIEWER: 代码质量与架构对齐评审（只读，不执行命令）。\n"
+        '  - BASH: 在终端执行具体命令（如运行测试 pytest、类型检查 mypy、lint、或执行「将已有内容写入/保存到本地」的操作）。仅当用户意图是「执行某条命令」或「运行/验证/保存到本地」时选 BASH；若意图是「写代码/实现功能/创建文件内容」应选 CODER。\n'
+        "  - GENERAL_PURPOSE: 快速只读搜索、通用代码查找。\n"
+        "  - MINI_CODER_GUIDE: 回答与 mini-coder 本身的使用、配置、工作流问题。\n"
+        '- "workflow": 用户明确要“从需求到实现到测试”的完整闭环，或多步骤连续执行（规划→实现→测试/验证）。\n'
         "只输出一行 JSON，不要其他字符。"
     )
 
@@ -594,25 +602,38 @@ class MiniCoderConsole:
     def _call_orchestrator_dispatch_and_display(
         self, user_input: str, forced_agent: Optional[str] = None
     ) -> Tuple[bool, Optional[float], Optional[float]]:
-        """经 WorkflowOrchestrator 派发子 agent 执行并展示结果，用于 TUI 下 agent 流转与 /agents 记录。
-
-        注意：子 agent（如 Coder）内部使用 chat() 非流式调用，故此处仅展示最终 summary，
-        无逐字流式输出；流式仅在 route=main 且 _call_llm_stream_and_display 时生效。
+        """经 WorkflowOrchestrator 派发子 agent 执行并展示结果；支持子 agent 流式输出与首字耗时。
 
         Returns:
-            (是否成功得到有效输出, 本次总耗时秒数, 首字耗时；非流式固定为 None)
+            (是否成功得到有效输出, 本次总耗时秒数, 首字耗时；未流式时为 None)
         """
         if self._orchestrator is None:
             return (False, None, None)
         t_start = time.perf_counter()
+        t_first_token: Optional[float] = None
+        had_streaming = False
+
+        def stream_callback(content: str) -> None:
+            nonlocal t_first_token, had_streaming
+            if t_first_token is None:
+                t_first_token = time.perf_counter()
+            had_streaming = True
+            self._console.print(content, end="")
+            if getattr(self._console, "file", None) is not None:
+                self._console.file.flush()
+
         try:
             if forced_agent:
                 from mini_coder.agents.orchestrator import SubAgentType
 
                 agent_type = SubAgentType[forced_agent]
-                result = self._orchestrator.dispatch_with_agent(agent_type, user_input)
+                result = self._orchestrator.dispatch_with_agent(
+                    agent_type, user_input, stream_callback=stream_callback
+                )
             else:
-                result = self._orchestrator.dispatch(user_input)
+                result = self._orchestrator.dispatch(
+                    user_input, stream_callback=stream_callback
+                )
         except Exception as e:
             logging.exception("Orchestrator dispatch failed: %s", e)
             duration_sec = time.perf_counter() - t_start
@@ -622,11 +643,14 @@ class MiniCoderConsole:
         ok = getattr(result, "success", False)
         output = getattr(result, "output", "") or ""
         error = getattr(result, "error", "") or ""
-        if output:
+        if had_streaming:
+            self._console.print()
+        elif output:
             self._console.print(Markdown(output))
         if not ok and error:
             self._console.print(Panel(f"[red]{error}[/red]", title="错误", border_style="red"))
-        return (ok, duration_sec, None)
+        duration_to_first = (t_first_token - t_start) if t_first_token is not None else None
+        return (ok, duration_sec, duration_to_first)
 
     def _call_orchestrator_workflow_and_display(
         self, user_input: str

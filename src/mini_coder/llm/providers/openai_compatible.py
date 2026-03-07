@@ -30,12 +30,18 @@ class OpenAICompatibleProvider(LLMProvider):
         base_url: str = "",
         model: str = "",
         system_prompt: str = "你是一个有用的 AI 助手",
+        timeout: float = 120.0,
     ):
-        """初始化 OpenAI 兼容提供商。"""
+        """初始化 OpenAI 兼容提供商。
+
+        Args:
+            timeout: HTTP 读超时（秒）。Coder 等长上下文请求可能超过 60s，建议 120 及以上。
+        """
         self._api_key = api_key
         self._base_url = base_url.rstrip('/')
         self._model = model
         self._system_prompt = system_prompt
+        self._timeout = max(30.0, float(timeout))
         self._client: httpx.Client | None = None
         self._conversation: List[Dict[str, str]] = []
 
@@ -57,10 +63,10 @@ class OpenAICompatibleProvider(LLMProvider):
         return self._base_url
 
     def _get_client(self) -> httpx.Client:
-        """获取或创建 httpx 客户端（复用连接）。"""
+        """获取或创建 httpx 客户端（复用连接）。读超时由初始化时的 timeout 决定。"""
         if self._client is None:
             self._client = httpx.Client(
-                timeout=httpx.Timeout(60.0, connect=5.0),
+                timeout=httpx.Timeout(self._timeout, connect=5.0),
                 follow_redirects=True,
             )
         return self._client
@@ -267,4 +273,81 @@ class OpenAICompatibleProvider(LLMProvider):
                 self.add_to_history("user", last_user_msg)
             self.add_to_history("assistant", full_content)
 
+        yield {"type": "done", "content": ""}
+
+    def send_messages_one_shot(self, messages: List[Dict[str, str]], **kwargs) -> str:
+        """发送指定消息列表并返回完整响应，不写入对话历史。
+
+        用于路由等一次性决策，避免污染主对话上下文。
+
+        Args:
+            messages: 消息列表，需包含 role 和 content。
+            **kwargs: 额外请求参数。
+
+        Returns:
+            助手回复的完整文本。
+        """
+        client = self._get_client()
+        url = f"{self._base_url}/chat/completions"
+
+        payload = {
+            "model": self._model,
+            "messages": messages,
+            "stream": False,
+            **kwargs
+        }
+
+        headers = {
+            "Authorization": self._auth_header(),
+            "Content-Type": "application/json",
+        }
+
+        response = client.post(url, json=payload, headers=headers)
+        response.raise_for_status()
+
+        data = response.json()
+        content = (data.get("choices") or [{}])[0].get("message", {}).get("content") or ""
+        return content
+
+    def send_messages_one_shot_stream(
+        self, messages: List[Dict[str, str]], **kwargs
+    ) -> Generator[Dict, None, None]:
+        """发送指定消息列表并流式返回响应，不写入对话历史。
+
+        用于子代理等一次性流式输出，避免污染主对话上下文。
+        """
+        client = self._get_client()
+        url = f"{self._base_url}/chat/completions"
+
+        payload = {
+            "model": self._model,
+            "messages": messages,
+            "stream": True,
+            **kwargs
+        }
+
+        headers = {
+            "Authorization": self._auth_header(),
+            "Content-Type": "application/json",
+        }
+
+        full_content = ""
+        with client.stream("POST", url, json=payload, headers=headers) as response:
+            for line in response.iter_lines():
+                if not line:
+                    continue
+                if line.startswith("data: "):
+                    data_str = line[6:]
+                    if data_str == "[DONE]":
+                        break
+                    try:
+                        data = json.loads(data_str)
+                        if data.get("choices"):
+                            delta = data["choices"][0].get("delta", {})
+                            content = delta.get("content") or delta.get("reasoning_content") or ""
+                            if content:
+                                full_content += content
+                                yield {"type": "delta", "content": content}
+                    except json.JSONDecodeError:
+                        continue
         yield {"type": "done", "content": ""}

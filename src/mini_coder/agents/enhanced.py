@@ -470,11 +470,14 @@ class BaseEnhancedAgent(ABC):
         return self._state
 
     @abstractmethod
-    def execute(self, task: str) -> EnhancedAgentResult:
+    def execute(
+        self, task: str, stream_callback: Optional[Callable[[str], None]] = None
+    ) -> EnhancedAgentResult:
         """执行任务
 
         Args:
             task: 任务描述
+            stream_callback: 可选，收到流式 delta 时调用，用于 TUI 逐字输出与首字耗时
 
         Returns:
             EnhancedAgentResult: 执行结果
@@ -711,7 +714,9 @@ class ArchitecturalConsultantAgent(BaseEnhancedAgent):
     ) -> None:
         super().__init__(llm_service, blackboard, ArchitecturalConsultantCapabilities())
 
-    def execute(self, task: str) -> EnhancedAgentResult:
+    def execute(
+        self, task: str, stream_callback: Optional[Callable[[str], None]] = None
+    ) -> EnhancedAgentResult:
         """执行架构咨询任务"""
         self._start_time = time.time()
         self._set_state(EnhancedAgentState.THINKING)
@@ -827,7 +832,9 @@ class CodeReviewerAgent(BaseEnhancedAgent):
     ) -> None:
         super().__init__(llm_service, blackboard, CodeReviewerCapabilities())
 
-    def execute(self, task: str) -> EnhancedAgentResult:
+    def execute(
+        self, task: str, stream_callback: Optional[Callable[[str], None]] = None
+    ) -> EnhancedAgentResult:
         """执行代码评审任务"""
         self._start_time = time.time()
         self._set_state(EnhancedAgentState.THINKING)
@@ -978,7 +985,9 @@ class PlannerAgent(BaseEnhancedAgent):
     ) -> None:
         super().__init__(llm_service, blackboard, PlannerCapabilities(), event_callback=event_callback)
 
-    def execute(self, task: str) -> EnhancedAgentResult:
+    def execute(
+        self, task: str, stream_callback: Optional[Callable[[str], None]] = None
+    ) -> EnhancedAgentResult:
         """执行规划任务"""
         self._start_time = time.time()
         self._set_state(EnhancedAgentState.THINKING)
@@ -1099,8 +1108,8 @@ class CoderAgent(BaseEnhancedAgent):
     ) -> None:
         super().__init__(llm_service, blackboard, CoderCapabilities(), event_callback=event_callback)
 
-    def execute(self, task: str) -> EnhancedAgentResult:
-        """执行编码任务"""
+    def execute(self, task: str, stream_callback: Optional[Callable[[str], None]] = None) -> EnhancedAgentResult:
+        """执行编码任务；支持 stream_callback 时流式输出。"""
         self._start_time = time.time()
         self._set_state(EnhancedAgentState.THINKING)
 
@@ -1114,12 +1123,21 @@ class CoderAgent(BaseEnhancedAgent):
             # 2. 获取现有代码（如果有重试）
             existing_code = self._get_existing_code()
 
-            # 3. 构建编码 prompt
-            prompt = self._build_coding_prompt(task, plan, existing_code)
+            # 3. 构建编码 prompt（system + user 用于流式 one-shot）
+            system_prompt, task_context = self._build_coding_prompt(task, plan, existing_code)
 
-            # 4. 调用 LLM
+            # 4. 调用 LLM（流式或非流式）
             self._set_state(EnhancedAgentState.EXECUTING)
-            response = self.llm_service.chat(prompt)
+            if stream_callback is not None:
+                response_parts: List[str] = []
+                for chunk in self.llm_service.chat_one_shot_stream(system_prompt, task_context):
+                    if chunk.get("type") == "delta" and chunk.get("content"):
+                        c = chunk["content"]
+                        response_parts.append(c)
+                        stream_callback(c)
+                response = "".join(response_parts)
+            else:
+                response = self.llm_service.chat(system_prompt + task_context)
 
             # 5. 解析并保存代码
             code_files = self._parse_code(response)
@@ -1167,15 +1185,11 @@ class CoderAgent(BaseEnhancedAgent):
         task: str,
         plan: str,
         existing_code: Dict[str, str]
-    ) -> str:
-        """构建编码 prompt
-
-        加载系统提示词并追加任务上下文；注入 work_dir 使模型使用真实项目路径。
-        """
+    ) -> tuple:
+        """构建编码 prompt，返回 (system_prompt, task_context) 便于流式 one-shot 调用。"""
         work_dir = (self.blackboard.get_context("work_dir") or "").strip()
         prompt_context = {"work_dir": work_dir or "<未设置，请使用相对路径如 calculator.py>"}
 
-        # 加载系统提示词（从 prompts/system/subagent-coder.md），注入 {{work_dir}}
         system_prompt = self._load_system_prompt(context=prompt_context)
 
         existing_code_str = "\n\n".join(
@@ -1199,7 +1213,7 @@ class CoderAgent(BaseEnhancedAgent):
 已有代码（若是重试）:
 {existing_code_str if existing_code_str else "无"}
 """
-        return system_prompt + task_context
+        return (system_prompt, task_context)
 
     def _parse_code(self, response: str) -> Dict[str, str]:
         """解析代码文件"""
@@ -1269,7 +1283,9 @@ class TesterAgent(BaseEnhancedAgent):
         super().__init__(llm_service, blackboard, TesterCapabilities(), event_callback=event_callback)
         self._command_executor = command_executor
 
-    def execute(self, task: str) -> EnhancedAgentResult:
+    def execute(
+        self, task: str, stream_callback: Optional[Callable[[str], None]] = None
+    ) -> EnhancedAgentResult:
         """执行测试任务"""
         self._start_time = time.time()
         self._set_state(EnhancedAgentState.THINKING)

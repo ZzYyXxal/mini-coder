@@ -467,6 +467,21 @@ class LLMService:
         ]
         return self.provider.send_messages_one_shot(messages, **kwargs)
 
+    def chat_one_shot_stream(self, system_prompt: str, user_message: str, **kwargs):
+        """一次性流式 LLM 调用，不写入对话历史。用于子代理流式输出。
+
+        Yields:
+            Dict 包含 type（delta/done）和 content。
+        """
+        if self.provider is None:
+            raise ValueError("No LLM provider configured.")
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_message},
+        ]
+        for chunk in self.provider.send_messages_one_shot_stream(messages, **kwargs):
+            yield chunk
+
     def _get_main_agent_system_prompt(self) -> str:
         """加载主代理（Master Agent）系统提示词，与子代理一样从 prompts/system 动态加载。"""
         if self._main_agent_prompt_cache is not None:

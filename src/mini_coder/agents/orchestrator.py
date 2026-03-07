@@ -654,7 +654,9 @@ class WorkflowOrchestrator:
             logger.info("Intent analysis: PLANNER (keywords match)")
             return SubAgentType.PLANNER
 
-        # Coder 关键词
+        # 不再用关键词单独判「写入本地」→ BASH，交给下方 LLM 按意图区分（BASH=执行命令/保存到本地，CODER=写代码/编辑内容）
+
+        # Coder 关键词（写代码、实现功能）
         coder_keywords = ["实现", "添加", "修改", "implement", "create", "write", "add", "feature", "功能"]
         if any(kw in intent_lower for kw in coder_keywords):
             logger.info("Intent analysis: CODER (keywords match)")
@@ -690,14 +692,14 @@ class WorkflowOrchestrator:
 
 User Request: {intent}
 
-Available Subagents:
-- EXPLORER: Read-only codebase search (find files, understand structure)
-- PLANNER: Requirements analysis and task planning (TDD plan creation)
-- CODER: Code implementation (write/edit code following TDD)
-- REVIEWER: Code quality review (architecture alignment + quality check)
-- BASH: Terminal execution (run tests, type check, lint)
-- GENERAL_PURPOSE: Fast read-only search using Haiku model (quick code exploration)
-- MINI_CODER_GUIDE: Mini-coder usage guide (answer questions about mini-coder itself)
+Available Subagents (choose by intent, not by keywords only):
+- EXPLORER: Read-only codebase search (find files, understand structure). No code writing, no command execution.
+- PLANNER: Requirements analysis, task breakdown, TDD plan creation (e.g. implementation_plan.md).
+- CODER: Code implementation — write or edit source code / file content (implement features, create or modify files). Content-centric.
+- REVIEWER: Code quality and architecture alignment review (read-only, no command execution).
+- BASH: Execute terminal commands (run tests e.g. pytest, type check mypy, lint; or perform "save/write to local" as running a command). Choose BASH only when the user intent is "run a command" or "execute/verify/save to local"; if the intent is "write code" or "implement feature" or "create file content", choose CODER. Command-centric; see command-prefix semantics for safety.
+- GENERAL_PURPOSE: Fast read-only search, quick code discovery.
+- MINI_CODER_GUIDE: Answer questions about mini-coder usage, config, workflow.
 
 Respond with only one word: EXPLORER, PLANNER, CODER, REVIEWER, BASH, GENERAL_PURPOSE, or MINI_CODER_GUIDE."""
 
@@ -786,7 +788,12 @@ Respond with only one word: EXPLORER, PLANNER, CODER, REVIEWER, BASH, GENERAL_PU
         else:
             raise ValueError(f"Unknown agent type: {agent_type}")
 
-    def dispatch(self, intent: str, context: Optional[Dict[str, Any]] = None) -> EnhancedAgentResult:
+    def dispatch(
+        self,
+        intent: str,
+        context: Optional[Dict[str, Any]] = None,
+        stream_callback: Optional[Any] = None,
+    ) -> EnhancedAgentResult:
         """直接派发子代理执行任务
 
         使用示例:
@@ -830,16 +837,16 @@ Respond with only one word: EXPLORER, PLANNER, CODER, REVIEWER, BASH, GENERAL_PU
         # 3. 创建子代理
         agent = self._create_subagent(agent_type)
 
-        # 4. 执行任务（base 系 agent 需传入含 work_dir 的 context，供提示词 {{work_dir}} 替换）
+        # 4. 执行任务（base 系 agent 需传入含 work_dir 的 context；stream_callback 用于 TUI 流式输出与首字耗时）
         if isinstance(agent, BaseEnhancedAgent):
-            result = agent.execute(intent)
+            result = agent.execute(intent, stream_callback=stream_callback)
         else:
             dispatch_context = context or {}
             if self._context is not None:
                 wd = self._context.blackboard.get_context("work_dir")
                 if wd is not None:
                     dispatch_context = {**dispatch_context, "work_dir": str(wd)}
-            result = agent.execute(intent, context=dispatch_context)
+            result = agent.execute(intent, context=dispatch_context, stream_callback=stream_callback)
 
         # 5. 发送 Agent 完成事件
         self._notify_agent_completed(agent_type, result)
@@ -851,6 +858,7 @@ Respond with only one word: EXPLORER, PLANNER, CODER, REVIEWER, BASH, GENERAL_PU
         agent_type: SubAgentType,
         intent: str,
         context: Optional[Dict[str, Any]] = None,
+        stream_callback: Optional[Any] = None,
     ) -> EnhancedAgentResult:
         """按指定子代理类型执行一次派发（用于结构化路由）。
 
@@ -864,14 +872,14 @@ Respond with only one word: EXPLORER, PLANNER, CODER, REVIEWER, BASH, GENERAL_PU
         self._notify_agent_started(agent_type)
         agent = self._create_subagent(agent_type)
         if isinstance(agent, BaseEnhancedAgent):
-            result = agent.execute(intent)
+            result = agent.execute(intent, stream_callback=stream_callback)
         else:
             dispatch_context = context or {}
             if self._context is not None:
                 wd = self._context.blackboard.get_context("work_dir")
                 if wd is not None:
                     dispatch_context = {**dispatch_context, "work_dir": str(wd)}
-            result = agent.execute(intent, context=dispatch_context)
+            result = agent.execute(intent, context=dispatch_context, stream_callback=stream_callback)
         self._notify_agent_completed(agent_type, result)
         return result
 

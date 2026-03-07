@@ -163,12 +163,18 @@ class BaseAgent(ABC):
         return ""
 
     @abstractmethod
-    def execute(self, task: str, context: Optional[Dict[str, Any]] = None) -> AgentResult:
+    def execute(
+        self,
+        task: str,
+        context: Optional[Dict[str, Any]] = None,
+        stream_callback: Optional[Any] = None,
+    ) -> AgentResult:
         """执行任务
 
         Args:
             task: 任务描述
             context: 可选的上下文信息
+            stream_callback: 可选，收到流式 delta 时调用 stream_callback(content: str)，用于 TUI 逐字输出与首字耗时
 
         Returns:
             AgentResult: 执行结果
@@ -214,6 +220,30 @@ class BaseAgent(ABC):
         response = self.llm_service.chat(full_prompt, **kwargs)
 
         return response
+
+    def _invoke_llm_stream(
+        self,
+        user_prompt: str,
+        stream_callback: Any,
+        system_prompt: Optional[str] = None,
+        **kwargs
+    ) -> str:
+        """流式调用 LLM，不写入主对话历史；每收到 delta 调用 stream_callback(content)，最后返回完整响应。"""
+        self.state.iteration_count += 1
+        if self.state.iteration_count > self.config.max_iterations:
+            raise RuntimeError(
+                f"Max iterations ({self.config.max_iterations}) exceeded"
+            )
+        invoke_context = kwargs.pop("_prompt_context", None)
+        sys_prompt = system_prompt or self.get_system_prompt(context=invoke_context)
+        user_message = user_prompt
+        full_response: List[str] = []
+        for chunk in self.llm_service.chat_one_shot_stream(sys_prompt, user_message, **kwargs):
+            if chunk.get("type") == "delta" and chunk.get("content"):
+                content = chunk["content"]
+                full_response.append(content)
+                stream_callback(content)
+        return "".join(full_response)
 
     def _is_tool_allowed(self, tool_name: str) -> bool:
         """检查工具是否允许使用
@@ -422,15 +452,24 @@ Behavior:
 Output:
 Report findings: files/code locations discovered, key conclusions, relevance to request."""
 
-    def execute(self, task: str, context: Optional[Dict[str, Any]] = None) -> AgentResult:
-        """执行探索任务"""
+    def execute(
+        self,
+        task: str,
+        context: Optional[Dict[str, Any]] = None,
+        stream_callback: Optional[Any] = None,
+    ) -> AgentResult:
+        """执行探索任务；支持 stream_callback 时流式输出。"""
         self.state.current_task = task
         self.state.is_busy = True
 
         try:
             user_prompt = self._build_explorer_prompt(task, context or {})
-            # 传入 _prompt_context 以便加载系统提示时替换 {{work_dir}} 等占位符
-            response = self._invoke_llm(user_prompt, _prompt_context=context or {})
+            if stream_callback is not None:
+                response = self._invoke_llm_stream(
+                    user_prompt, stream_callback, _prompt_context=context or {}
+                )
+            else:
+                response = self._invoke_llm(user_prompt, _prompt_context=context or {})
 
             self.state.is_busy = False
 
@@ -521,7 +560,12 @@ Output Format (STRICT BINARY CHOICE):
 2. [Quality] Specific file:line - issue + fix suggestion
 3. [Style] Specific file:line - issue + fix suggestion"""
 
-    def execute(self, task: str, context: Optional[Dict[str, Any]] = None) -> AgentResult:
+    def execute(
+        self,
+        task: str,
+        context: Optional[Dict[str, Any]] = None,
+        stream_callback: Optional[Any] = None,
+    ) -> AgentResult:
         """执行评审任务"""
         self.state.current_task = task
         self.state.is_busy = True
@@ -645,7 +689,12 @@ Command Blacklist (Prohibited):
 Output Format:
 Generate quality report with test results, type check, code style, and coverage."""
 
-    def execute(self, task: str, context: Optional[Dict[str, Any]] = None) -> AgentResult:
+    def execute(
+        self,
+        task: str,
+        context: Optional[Dict[str, Any]] = None,
+        stream_callback: Optional[Any] = None,
+    ) -> AgentResult:
         """执行 Bash 任务"""
         self.state.current_task = task
         self.state.is_busy = True
@@ -852,14 +901,22 @@ Report your findings clearly:
 3. Relevant patterns or matches
 4. Brief conclusions about what you found"""
 
-    def execute(self, task: str, context: Optional[Dict[str, Any]] = None) -> AgentResult:
-        """执行通用搜索任务"""
+    def execute(
+        self,
+        task: str,
+        context: Optional[Dict[str, Any]] = None,
+        stream_callback: Optional[Any] = None,
+    ) -> AgentResult:
+        """执行通用搜索任务；支持 stream_callback 时流式输出。"""
         self.state.current_task = task
         self.state.is_busy = True
 
         try:
             user_prompt = self._build_general_purpose_prompt(task, context or {})
-            response = self._invoke_llm(user_prompt)
+            if stream_callback is not None:
+                response = self._invoke_llm_stream(user_prompt, stream_callback)
+            else:
+                response = self._invoke_llm(user_prompt)
 
             self.state.is_busy = False
 
@@ -992,8 +1049,13 @@ You do not edit code or run terminal commands; you answer questions and point to
 - No emojis.
 - Do not suggest running destructive or sensitive commands; only point to docs or config."""
 
-    def execute(self, task: str, context: Optional[Dict[str, Any]] = None) -> AgentResult:
-        """执行指南任务 - 回答用户关于 mini-coder 的问题"""
+    def execute(
+        self,
+        task: str,
+        context: Optional[Dict[str, Any]] = None,
+        stream_callback: Optional[Any] = None,
+    ) -> AgentResult:
+        """执行指南任务 - 回答用户关于 mini-coder 的问题；支持 stream_callback 时流式输出。"""
         self.state.current_task = task
         self.state.is_busy = True
 
@@ -1003,7 +1065,10 @@ You do not edit code or run terminal commands; you answer questions and point to
 
             # 构建回答
             user_prompt = self._build_guide_prompt(task, doc_search, context or {})
-            response = self._invoke_llm(user_prompt)
+            if stream_callback is not None:
+                response = self._invoke_llm_stream(user_prompt, stream_callback, _prompt_context=context or {})
+            else:
+                response = self._invoke_llm(user_prompt, _prompt_context=context or {})
 
             self.state.is_busy = False
 
