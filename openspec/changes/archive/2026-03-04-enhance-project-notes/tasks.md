@@ -36,11 +36,11 @@
 ## 4. Embedding Service Implementation
 
 - [x] 4.1 Create `src/mini_coder/memory/embeddings.py` module
-- [x] 4.2 Implement `LocalEmbeddingService` class with sentence-transformers
+- [x] 4.2 Implement `LocalEmbeddingService` class (fastembed default, optional API)
 - [x] 4.3 Add `embed(text) -> np.ndarray` method
 - [x] 4.4 Add `embed_batch(texts) -> np.ndarray` method
 - [x] 4.5 Add `cosine_similarity(a, b)` static method
-- [x] 4.6 Add graceful fallback when sentence-transformers not installed
+- [x] 4.6 Add graceful fallback when embedding backend unavailable
 - [x] 4.7 Write unit tests in `tests/memory/test_embeddings.py`
 - [x] 4.8 Add embeddings to `memory/__init__.py` exports
 
@@ -82,7 +82,7 @@
 - [x] 8.1 Add `notes.auto_extract.enabled` config option (default: true)
 - [x] 8.2 Add `notes.auto_extract.confidence_threshold` config option (default: 0.8)
 - [x] 8.3 Add `notes.semantic_search.enabled` config option (default: false)
-- [x] 8.4 Add `notes.semantic_search.model` config option (default: "all-MiniLM-L6-v2")
+- [x] 8.4 Add `notes.semantic_search.model` / embeddings model config (default: fastembed model)
 - [x] 8.5 Add `notes.semantic_search.similarity_threshold` config option (default: 0.7)
 - [x] 8.6 Add `notes.relations.enabled` config option (default: true)
 - [x] 8.7 Add `notes.relations.auto_detect` config option (default: true)
@@ -92,7 +92,7 @@
 
 ## 9. Dependencies
 
-- [x] 9.1 Add `sentence-transformers` as optional dependency in pyproject.toml
+- [x] 9.1 Add `fastembed` as optional dependency in pyproject.toml (semantic); optional `openai` for API backend
 - [x] 9.2 Add `numpy` as dependency (required for embeddings)
 - [x] 9.3 Update requirements.txt if needed
 

@@ -220,3 +220,202 @@ class TestCommandToolIntegration:
         # Try banned command
         result = tool.run({"command": "curl https://example.com"})
         assert result.error_code == "EXECUTION_FAILED"
+
+
+# ==================== CommandTool v2.0 Tests ====================
+
+
+class TestCommandToolV2Init:
+    """Tests for CommandTool v2.0 initialization"""
+
+    def test_create_with_base_tool_interface(self) -> None:
+        """Test creating CommandTool with BaseTool 2.0 interface"""
+        from src.mini_coder.tools.base import BaseTool
+
+        tool = CommandTool()
+
+        # Verify inheritance
+        assert isinstance(tool, BaseTool)
+        assert tool.TOOL_TYPE == "command"
+        assert tool._prompt_path == "tools/command.md"
+
+    def test_create_with_event_callback(self) -> None:
+        """Test creating CommandTool with event callback"""
+        events_received = []
+
+        def callback(tool_name: str, event_type: str, data: dict) -> None:
+            events_received.append((tool_name, event_type, data))
+
+        tool = CommandTool(event_callback=callback)
+
+        # Run a command to trigger events
+        tool.run({"command": "echo test"})
+
+        # Should receive start and complete events
+        assert len(events_received) >= 2
+        assert events_received[0][1] == "start"
+        assert events_received[-1][1] == "complete"
+
+    def test_create_with_config_dict(self) -> None:
+        """Test creating CommandTool with config dict"""
+        tool = CommandTool(
+            config={
+                "security_mode": "strict",
+                "timeout": 60,
+                "max_output_length": 10000,
+            }
+        )
+
+        assert tool.security_mode == SecurityMode.STRICT
+        assert tool._executor.timeout == 60
+        assert tool._executor.max_output_length == 10000
+
+    def test_backward_compatibility_with_string_security_mode(self) -> None:
+        """Test backward compatibility with string security mode"""
+        tool = CommandTool(security_mode="normal")
+        assert tool.security_mode == SecurityMode.NORMAL
+
+        tool2 = CommandTool(security_mode="strict")
+        assert tool2.security_mode == SecurityMode.STRICT
+
+
+class TestCommandToolV2PromptLoading:
+    """Tests for CommandTool v2.0 dynamic prompt loading"""
+
+    def test_load_prompt_from_file(self) -> None:
+        """Test loading prompt from file"""
+        tool = CommandTool()
+
+        prompt = tool.get_system_prompt()
+
+        assert len(prompt) > 100
+        assert "Command Tool" in prompt
+        assert "Security Model" in prompt
+
+    def test_load_prompt_with_context(self) -> None:
+        """Test loading prompt with context interpolation"""
+        tool = CommandTool()
+
+        context = {
+            "security_mode": "strict",
+            "timeout": 300,
+            "max_timeout": 600,
+            "max_output_length": 50000,
+            "allowed_paths": "/project, /tmp",
+        }
+        prompt = tool.get_system_prompt(context)
+
+        # Verify placeholders are interpolated
+        assert "strict" in prompt
+        assert "300" in prompt
+
+    def test_load_prompt_fallback(self) -> None:
+        """Test loading prompt with non-existent file (fallback)"""
+        tool = CommandTool()
+
+        # Should not raise exception even if prompt file is missing
+        prompt = tool.get_system_prompt()
+        assert len(prompt) > 0
+
+
+class TestCommandToolV2Events:
+    """Tests for CommandTool v2.0 event callbacks"""
+
+    def test_event_start(self) -> None:
+        """Test start event"""
+        events = []
+        def callback(tool_name: str, event_type: str, data: dict) -> None:
+            events.append((event_type, data))
+
+        tool = CommandTool(event_callback=callback)
+        tool.run({"command": "echo hello"})
+
+        start_events = [e for e in events if e[0] == "start"]
+        assert len(start_events) == 1
+        assert start_events[0][1]["command"] == "echo hello"
+
+    def test_event_security_check(self) -> None:
+        """Test security_check event"""
+        events = []
+        def callback(tool_name: str, event_type: str, data: dict) -> None:
+            events.append((event_type, data))
+
+        tool = CommandTool(event_callback=callback)
+        tool.run({"command": "echo hello"})
+
+        security_events = [e for e in events if e[0] == "security_check"]
+        assert len(security_events) == 1
+        assert security_events[0][1]["category"] == "safe"
+
+    def test_event_complete(self) -> None:
+        """Test complete event"""
+        events = []
+        def callback(tool_name: str, event_type: str, data: dict) -> None:
+            events.append((event_type, data))
+
+        tool = CommandTool(event_callback=callback)
+        tool.run({"command": "echo hello"})
+
+        complete_events = [e for e in events if e[0] == "complete"]
+        assert len(complete_events) == 1
+        assert "command" in complete_events[0][1]
+        assert "exit_code" in complete_events[0][1]
+        assert "duration_ms" in complete_events[0][1]
+
+    def test_event_error(self) -> None:
+        """Test error event"""
+        events = []
+        def callback(tool_name: str, event_type: str, data: dict) -> None:
+            events.append((event_type, data))
+
+        tool = CommandTool(event_callback=callback)
+        # Use a banned command to trigger error event
+        tool.run({"command": "curl https://example.com"})
+
+        # Should have error event
+        error_events = [e for e in events if e[0] == "error"]
+        assert len(error_events) >= 1
+        assert "error_code" in error_events[0][1]
+        assert "error_message" in error_events[0][1]
+
+    def test_event_banned_command(self) -> None:
+        """Test events for banned command"""
+        events = []
+        def callback(tool_name: str, event_type: str, data: dict) -> None:
+            events.append((event_type, data))
+
+        tool = CommandTool(event_callback=callback)
+        tool.run({"command": "curl https://example.com"})
+
+        # Should have start, security_check (banned), error events
+        event_types = [e[0] for e in events]
+        assert "start" in event_types
+        assert "security_check" in event_types
+        assert "error" in event_types
+
+
+class TestCommandToolV2Config:
+    """Tests for CommandTool v2.0 configuration"""
+
+    def test_get_config(self) -> None:
+        """Test getting configuration"""
+        tool = CommandTool(config={"custom_key": "custom_value", "timeout": 180})
+
+        assert tool.get_config("custom_key") == "custom_value"
+        assert tool.get_config("timeout") == 180
+        assert tool.get_config("nonexistent", "default") == "default"
+
+    def test_to_dict(self) -> None:
+        """Test converting tool to dict"""
+        tool = CommandTool(
+            security_mode=SecurityMode.NORMAL,
+            config={"timeout": 120}
+        )
+
+        info = tool.to_dict()
+
+        assert info["name"] == "Command"
+        assert info["tool_type"] == "command"
+        assert info["prompt_path"] == "tools/command.md"
+        assert "parameters" in info
+        assert len(info["parameters"]) > 0

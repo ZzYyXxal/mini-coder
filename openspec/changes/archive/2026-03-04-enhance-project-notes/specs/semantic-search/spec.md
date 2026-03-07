@@ -6,7 +6,7 @@ Capability for vector-based semantic similarity search for notes using local emb
 
 ### Requirement: Local embedding generation
 
-The system SHALL generate embeddings for note content using sentence-transformers when semantic search is enabled.
+The system SHALL generate embeddings for note content using the configured embedding backend (default: fastembed; optional: API) when semantic search is enabled.
 
 #### Scenario: Generate embedding for new note
 - **WHEN** a new note is created and semantic search is enabled
@@ -57,14 +57,14 @@ The system SHALL support combining keyword and semantic search.
 
 ### Requirement: Optional dependency handling
 
-The system SHALL gracefully handle missing sentence-transformers dependency.
+The system SHALL gracefully handle missing embedding backend (fastembed not installed, or API not configured).
 
 #### Scenario: Semantic search disabled when unavailable
-- **WHEN** sentence-transformers is not installed
+- **WHEN** no embedding backend is available
 - **AND** semantic search is enabled in config
 - **THEN** system SHALL log a warning
 - **AND** fall back to keyword search
 
 #### Scenario: Clear error message
-- **WHEN** user explicitly requests semantic search without dependency
-- **THEN** system SHALL return clear error message with installation instructions
+- **WHEN** user explicitly requests semantic search without an available backend
+- **THEN** system SHALL return clear error message with installation or configuration instructions

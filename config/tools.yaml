@@ -4,6 +4,9 @@
 # Command Tool Settings
 # 命令执行工具配置
 command:
+  # 提示词模板路径（相对于 prompts/ 目录）
+  prompt_path: "tools/command.md"
+
   # 安全模式：strict, normal, trust
   # - strict: 只有白名单命令可以执行
   # - normal: 黑名单 + 白名单 + 权限确认（默认）
@@ -35,6 +38,15 @@ command:
   # 自定义白名单（追加到默认白名单）
   safe_commands:
     - my_safe_command
+
+  # 事件回调配置
+  events:
+    enabled: true
+    on_start: true      # 执行开始时通知
+    on_complete: true   # 执行完成时通知
+    on_error: true      # 发生错误时通知
+    on_security_check: true  # 安全检查时通知
+    on_permission_request: true  # 请求权限时通知
 
 # Tool Filter Settings
 # 工具过滤器配置

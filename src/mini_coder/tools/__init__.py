@@ -6,6 +6,7 @@ Provides tool base classes and utilities:
 - PromptLoader: Dynamic prompt loader with template interpolation
 - CommandTool: Safe system command executor
 - ToolFilter: Tool access control filters
+- ToolEventAdapter: Bridge tool events to TUI callbacks
 """
 
 from .security import SecurityMode, SecurityLevel
@@ -29,6 +30,11 @@ from .filter import (
     BashRestrictedFilter,
     WorkDirFilter,
 )
+from .event_adapter import (
+    ToolEvent,
+    ToolEventAdapter,
+    ToolEventCollector,
+)  # v2.0
 
 __all__ = [
     # v1.0 - Backward compatible
@@ -53,4 +59,7 @@ __all__ = [
     "PromptLoader",
     "BashRestrictedFilter",
     "WorkDirFilter",
+    "ToolEvent",
+    "ToolEventAdapter",
+    "ToolEventCollector",
 ]

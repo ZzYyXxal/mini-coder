@@ -6,6 +6,17 @@
 - Orchestrator: 工作流协调器
 - Enhanced Agents: 增强的 Agent 类 (Planner, Coder, Tester)
 - Blackboard: 共享上下文管理
+
+Agent 基类架构:
+- BaseEnhancedAgent: 工作流参与者，需要 Blackboard，支持事件驱动和 Mailbox 协议
+  - 子类: PlannerAgent, CoderAgent, TesterAgent
+- BaseAgent: 独立工具型 Agent，支持动态提示词加载，无 Blackboard 依赖
+  - 子类: ExplorerAgent, ReviewerAgent, BashAgent, GeneralPurposeAgent
+
+共享组件:
+- AgentCapabilities: Agent 能力定义（工具权限、文件访问模式等）
+- EventType/Event: 事件系统
+- Blackboard: 共享上下文和工件管理
 """
 
 from mini_coder.agents.orchestrator import (
@@ -93,6 +104,26 @@ from mini_coder.agents.base import (
     MiniCoderGuideAgent,
 )
 
+from mini_coder.agents.output_parser import (
+    # Enums
+    MainAgentOutputType,
+    ReviewerResultType,
+    # Data Classes
+    SubTask,
+    MainAgentOutput,
+    ReviewerIssue,
+    ReviewerOutput,
+    QualityReport,
+    # Parsers
+    MainAgentParser,
+    ReviewerParser,
+    QualityReportParser,
+    # Convenience Functions
+    parse_main_agent_output,
+    parse_reviewer_output,
+    parse_quality_report,
+)
+
 __all__ = [
     # Orchestrator
     "WorkflowState",
@@ -165,4 +196,18 @@ __all__ = [
     "GeneralPurposeAgent",
     "MiniCoderGuideCapabilities",
     "MiniCoderGuideAgent",
+    # Output Parsers
+    "MainAgentOutputType",
+    "ReviewerResultType",
+    "SubTask",
+    "MainAgentOutput",
+    "ReviewerIssue",
+    "ReviewerOutput",
+    "QualityReport",
+    "MainAgentParser",
+    "ReviewerParser",
+    "QualityReportParser",
+    "parse_main_agent_output",
+    "parse_reviewer_output",
+    "parse_quality_report",
 ]

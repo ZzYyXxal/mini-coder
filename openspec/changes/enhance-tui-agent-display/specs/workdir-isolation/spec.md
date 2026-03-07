@@ -34,6 +34,9 @@
 
 实现工具级别的访问控制过滤器。
 
+**集成方式（与实现一致）：**  
+在 **Read / Write / Glob** 等工具**执行前**，对路径参数调用 `WorkDirFilter.is_path_allowed(path)`；若返回 `False`，则**不执行该工具调用**，并返回**明确错误**（例如「路径不在工作目录内」或「访问被拒绝」），避免泄露内部路径。
+
 **Filter Behavior:**
 - 检查文件路径是否在工作目录内
 - 检查路径是否匹配 denied patterns
@@ -87,6 +90,10 @@ access_control:
 ```
 
 ## Implementation Details
+
+### 调用时机
+
+- WorkDirFilter 在 **工具执行前** 被调用：对 Read/Write/Glob 等工具的路径参数先做 `is_path_allowed(path)`，通过才执行，否则返回明确错误。
 
 ### WorkDirFilter Class
 

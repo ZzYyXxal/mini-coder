@@ -88,6 +88,10 @@
 - [ ] 10.3 实现 `/logs` 命令查看日志
 - [ ] 10.4 编写日志测试
 
+## 后续扩展（工具环，非 Phase 1 必须）
+
+- [ ] 若需 Explorer/Reviewer 在 TUI 中显示工具调用：为其接入工具环（或单点注入事件），在调用 Read/Grep 等时上报 TOOL_*，参见 design 中「工具环与后续扩展」。Phase 1 不强制。
+
 ## Phase 3: 增强显示（可选）
 
 ### 11. Agent Flow Visualization

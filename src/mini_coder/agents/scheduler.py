@@ -1,15 +1,16 @@
-"""并行调度器 - 统一管理 Agent 级和 Tool 级并发。
+"""并行调度器 - 统一管理 Agent 级并发。
 
 核心职责:
 1. Agent 级并行 - 多个 Agent 同时执行任务
-2. Tool 级并行 - Agent 内并行调用多个 Tool
-3. 资源管理 - Semaphore 控制并发数量
-4. 超时控制 - 单任务和批量任务超时保护
-5. 错误处理 - 部分成功继续、失败策略
+2. 资源管理 - Semaphore 控制并发数量
+3. 超时控制 - 单任务和批量任务超时保护
+4. 错误处理 - 部分成功继续、失败策略
+
+注意: Tool 级并行调度已移至 ToolScheduler 类。
 
 使用示例:
 ```python
-scheduler = ParallelScheduler(max_agent_concurrency=3, max_tool_concurrency=3)
+scheduler = ParallelScheduler(max_agent_concurrency=3)
 
 # 单任务执行
 result = await scheduler.schedule_agent_single(task_brief, agent_factory)
@@ -17,8 +18,10 @@ result = await scheduler.schedule_agent_single(task_brief, agent_factory)
 # 并行任务执行
 result_group = await scheduler.schedule_agent_batch(parallel_task_group, agent_factory)
 
-# Tool 批量调用
-tool_result = await scheduler.schedule_tool_batch(tool_batch_request, tool_executor)
+# Tool 批量调用 - 使用 ToolScheduler
+from mini_coder.agents.tool_scheduler import ToolScheduler
+tool_scheduler = ToolScheduler(max_concurrency=3)
+tool_result = await tool_scheduler.execute_batch(tool_calls, tool_registry)
 ```
 """
 
@@ -56,64 +59,49 @@ class SchedulerStatus:
     """调度器状态快照。"""
 
     running_agents: int
-    running_tools: int
     waiting_agents: int
-    waiting_tools: int
     max_agent_concurrency: int
-    max_tool_concurrency: int
 
 
 class ParallelScheduler:
-    """统一并行调度器，管理 Agent 级和 Tool 级并发。
+    """Agent 级并行调度器。
 
     特性:
     - 使用 asyncio.Semaphore 控制并发数量
     - 支持单任务和批量任务执行
     - 支持部分成功继续策略
     - 支持超时控制和错误处理
+
+    注意: Tool 级调度请使用 ToolScheduler 类。
     """
 
     def __init__(
         self,
         max_agent_concurrency: int = DEFAULT_MAX_CONCURRENCY,
-        max_tool_concurrency: int = DEFAULT_MAX_CONCURRENCY,
         default_agent_timeout: float = DEFAULT_AGENT_TIMEOUT,
-        default_tool_timeout: float = DEFAULT_TOOL_TIMEOUT,
     ):
         """初始化调度器。
 
         Args:
             max_agent_concurrency: Agent 级最大并发数 (1-3)
-            max_tool_concurrency: Tool 级最大并发数 (1-3)
             default_agent_timeout: Agent 任务默认超时时间 (秒)
-            default_tool_timeout: Tool 调用默认超时时间 (秒)
         """
         if not 1 <= max_agent_concurrency <= 3:
             raise ValueError(f"max_agent_concurrency must be 1-3, got {max_agent_concurrency}")
-        if not 1 <= max_tool_concurrency <= 3:
-            raise ValueError(f"max_tool_concurrency must be 1-3, got {max_tool_concurrency}")
 
         self._max_agent_concurrency = max_agent_concurrency
-        self._max_tool_concurrency = max_tool_concurrency
         self._default_agent_timeout = default_agent_timeout
-        self._default_tool_timeout = default_tool_timeout
 
         # 并发控制信号量
         self._agent_semaphore = asyncio.Semaphore(max_agent_concurrency)
-        self._tool_semaphore = asyncio.Semaphore(max_tool_concurrency)
 
         # 运行中的任务跟踪
-        self._running_agents: Dict[str, asyncio.Task] = {}
-        self._running_tools: Dict[str, asyncio.Task] = {}
+        self._running_agents: Dict[str, asyncio.Task[SubagentResult]] = {}
 
         # 任务超时配置
         self._agent_timeouts: Dict[str, float] = {}
-        self._tool_timeouts: Dict[str, float] = {}
 
-        logger.info(
-            f"ParallelScheduler initialized "
-            f"(max_agents={max_agent_concurrency}, max_tools={max_tool_concurrency})"
-        )
+        logger.info(f"ParallelScheduler initialized (max_agents={max_agent_concurrency})")
 
     # ==================== Agent 级调度 ====================
 
@@ -186,7 +174,7 @@ class ParallelScheduler:
         """
         start_time = time.time()
         results: List[SubagentResult] = []
-        task_map: List[tuple] = []  # [(task_id, asyncio.Task), ...]
+        task_map: List[tuple[str, asyncio.Task[SubagentResult]]] = []  # [(task_id, asyncio.Task), ...]
 
         async def run_with_semaphore(task_brief: TaskBrief) -> SubagentResult:
             async with self._agent_semaphore:
@@ -203,14 +191,33 @@ class ParallelScheduler:
         try:
             if group.fail_strategy == FAIL_STRATEGY_FAIL_FAST:
                 # 任一失败立即停止
+                # 使用 FIRST_COMPLETED 而不是 FIRST_EXCEPTION，因为取消的任务也需要处理
                 done, pending = await asyncio.wait(
                     [t for _, t in task_map],
-                    return_when=asyncio.FIRST_EXCEPTION,
+                    return_when=asyncio.FIRST_COMPLETED,
                     timeout=group.timeout_total,
                 )
-                # 取消未完成的任务
-                for task in pending:
-                    task.cancel()
+
+                # 检查第一个完成的任务是否失败
+                first_failed = False
+                for task in done:
+                    try:
+                        if task.cancelled():
+                            first_failed = True
+                            break
+                        # 尝试获取结果，如果抛出异常则标记失败
+                        task.result()
+                    except Exception:
+                        first_failed = True
+                        break
+
+                # 如果第一个任务失败，取消所有未完成的任务
+                if first_failed:
+                    for task in pending:
+                        task.cancel()
+                    # 等待取消完成
+                    if pending:
+                        await asyncio.gather(*pending, return_exceptions=True)
             else:
                 # 继续执行，等待所有完成
                 done, pending = await asyncio.wait(
@@ -221,9 +228,16 @@ class ParallelScheduler:
                 # 超时后取消未完成的任务
                 for task in pending:
                     task.cancel()
+                # 等待取消完成
+                if pending:
+                    await asyncio.gather(*pending, return_exceptions=True)
 
         except Exception as e:
             logger.exception(f"Batch execution error: {e}")
+            # 确保所有任务都被取消
+            for _, task in task_map:
+                if not task.done():
+                    task.cancel()
 
         # 收集结果
         cancelled_count = 0
@@ -325,7 +339,7 @@ class ParallelScheduler:
 
         支持同步和异步 Agent：
         - 如果 Agent.execute 是异步方法，直接 await
-        - 如果是同步方法，在 executor 中运行
+        - 如果是同步方法，在 executor 中运行（避免阻塞事件循环）
         """
         import inspect
 
@@ -333,8 +347,11 @@ class ParallelScheduler:
         from mini_coder.agents.enhanced import BaseEnhancedAgent, EnhancedAgentResult
 
         if isinstance(agent, BaseEnhancedAgent):
-            # Enhanced Agent 使用同步 execute
-            result = agent.execute(task_brief.intent)
+            # Enhanced Agent 使用同步 execute，必须在 executor 中运行以避免阻塞事件循环
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(
+                None, lambda: agent.execute(task_brief.intent)
+            )
             return self._convert_enhanced_result(result, task_brief.task_id, agent.name)
         else:
             # 普通 Agent
@@ -413,223 +430,6 @@ class ParallelScheduler:
         else:
             return "coder"  # 默认
 
-    # ==================== Tool 级调度 ====================
-
-    async def schedule_tool_batch(
-        self,
-        batch: ToolBatchRequest,
-        tool_executor: Callable[[str, Dict[str, Any]], Any],
-    ) -> ToolBatchResult:
-        """并行执行多个 Tool 调用。
-
-        支持依赖关系（DAG），按拓扑序分批执行。
-
-        Args:
-            batch: Tool 批量调用请求
-            tool_executor: Tool 执行函数，接收 (tool_name, arguments) 返回结果
-
-        Returns:
-            ToolBatchResult: 批量调用结果
-        """
-        start_time = time.time()
-        results: List[ToolCallResult] = []
-
-        # 构建依赖图并获取执行批次
-        batches = self._build_execution_batches(batch.tool_calls)
-
-        # 存储每个调用的结果，用于依赖解析
-        call_results: Dict[str, Any] = {}
-
-        for batch_calls in batches:
-            # 同一批次内的调用并行执行
-            batch_results = await self._execute_tool_batch(
-                batch_calls, tool_executor, batch.timeout_per_call, call_results
-            )
-
-            # 更新结果映射
-            for result in batch_results:
-                call_results[result.call_id] = result.output if result.success else None
-                results.append(result)
-
-        elapsed_time = time.time() - start_time
-        success_count = sum(1 for r in results if r.success)
-
-        return ToolBatchResult(
-            batch_id=batch.batch_id,
-            results=results,
-            success_count=success_count,
-            failure_count=len(results) - success_count,
-            elapsed_time=elapsed_time,
-        )
-
-    def _build_execution_batches(self, tool_calls: List[ToolCall]) -> List[List[ToolCall]]:
-        """构建执行批次（拓扑排序）。
-
-        无依赖的调用放在第一批，
-        依赖前面批次的调用放在后续批次。
-        """
-        # 构建依赖图
-        call_map = {tc.call_id: tc for tc in tool_calls}
-        in_degree = {tc.call_id: 0 for tc in tool_calls}
-        dependents: Dict[str, List[str]] = {tc.call_id: [] for tc in tool_calls}
-
-        for tc in tool_calls:
-            for dep_id in tc.depends_on:
-                if dep_id in call_map:
-                    dependents[dep_id].append(tc.call_id)
-                    in_degree[tc.call_id] += 1
-
-        # 拓扑排序，分层构建批次
-        batches: List[List[ToolCall]] = []
-        remaining = set(in_degree.keys())
-
-        while remaining:
-            # 找出当前层（入度为 0）
-            current_layer = [
-                call_map[call_id]
-                for call_id in remaining
-                if in_degree[call_id] == 0
-            ]
-
-            if not current_layer:
-                # 存在循环依赖，按原顺序执行剩余调用
-                logger.warning("Circular dependency detected in tool calls")
-                current_layer = [call_map[call_id] for call_id in remaining]
-
-            batches.append(current_layer)
-
-            # 更新入度
-            for tc in current_layer:
-                for dep_call_id in dependents[tc.call_id]:
-                    in_degree[dep_call_id] -= 1
-                remaining.discard(tc.call_id)
-
-        return batches
-
-    async def _execute_tool_batch(
-        self,
-        tool_calls: List[ToolCall],
-        tool_executor: Callable[[str, Dict[str, Any]], Any],
-        timeout: float,
-        previous_results: Dict[str, Any],
-    ) -> List[ToolCallResult]:
-        """执行一批 Tool 调用（并行）。"""
-        results: List[ToolCallResult] = []
-
-        async def run_single(tc: ToolCall) -> ToolCallResult:
-            async with self._tool_semaphore:
-                start = time.time()
-                try:
-                    # 解析参数中的占位符
-                    resolved_args = self._resolve_args(tc.arguments, previous_results)
-
-                    # 执行 Tool
-                    output = await asyncio.wait_for(
-                        self._run_tool(tool_executor, tc.tool_name, resolved_args),
-                        timeout=timeout,
-                    )
-
-                    return ToolCallResult(
-                        call_id=tc.call_id,
-                        tool_name=tc.tool_name,
-                        success=True,
-                        duration=time.time() - start,
-                        output=output,
-                    )
-                except asyncio.TimeoutError:
-                    return ToolCallResult(
-                        call_id=tc.call_id,
-                        tool_name=tc.tool_name,
-                        success=False,
-                        duration=time.time() - start,
-                        error=f"Timeout after {timeout}s",
-                    )
-                except Exception as e:
-                    return ToolCallResult(
-                        call_id=tc.call_id,
-                        tool_name=tc.tool_name,
-                        success=False,
-                        duration=time.time() - start,
-                        error=str(e),
-                    )
-
-        # 并行执行
-        tasks = [asyncio.create_task(run_single(tc)) for tc in tool_calls]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-
-        # 处理异常结果
-        final_results = []
-        for i, result in enumerate(results):
-            if isinstance(result, Exception):
-                final_results.append(ToolCallResult(
-                    call_id=tool_calls[i].call_id,
-                    tool_name=tool_calls[i].tool_name,
-                    success=False,
-                    duration=0,
-                    error=str(result),
-                ))
-            else:
-                final_results.append(result)
-
-        return final_results
-
-    async def _run_tool(
-        self,
-        tool_executor: Callable[[str, Dict[str, Any]], Any],
-        tool_name: str,
-        arguments: Dict[str, Any],
-    ) -> Any:
-        """执行单个 Tool。"""
-        import inspect
-
-        if inspect.iscoroutinefunction(tool_executor):
-            return await tool_executor(tool_name, arguments)
-        else:
-            loop = asyncio.get_event_loop()
-            return await loop.run_in_executor(
-                None, lambda: tool_executor(tool_name, arguments)
-            )
-
-    def _resolve_args(
-        self,
-        args: Dict[str, Any],
-        previous_results: Dict[str, Any],
-    ) -> Dict[str, Any]:
-        """解析参数中的占位符引用。
-
-        支持格式: {{call_id.output.field}}
-        """
-        import re
-
-        resolved = {}
-        for key, value in args.items():
-            if isinstance(value, str) and "{{" in value:
-                # 替换占位符
-                def replace_placeholder(match):
-                    path = match.group(1).split(".")
-                    result = previous_results.get(path[0])
-                    if result is None:
-                        return match.group(0)  # 保持原样
-                    for field in path[1:]:
-                        if isinstance(result, dict):
-                            result = result.get(field)
-                        else:
-                            return match.group(0)
-                    return str(result) if result is not None else match.group(0)
-
-                resolved[key] = re.sub(r'\{\{(\w+(?:\.\w+)*)\}\}', replace_placeholder, value)
-            elif isinstance(value, dict):
-                resolved[key] = self._resolve_args(value, previous_results)
-            elif isinstance(value, list):
-                resolved[key] = [
-                    self._resolve_args(v, previous_results) if isinstance(v, dict) else v
-                    for v in value
-                ]
-            else:
-                resolved[key] = value
-
-        return resolved
-
     # ==================== 任务管理 ====================
 
     def cancel_task(self, task_id: str) -> bool:
@@ -641,7 +441,7 @@ class ParallelScheduler:
         Returns:
             bool: 是否成功取消
         """
-        task = self._running_agents.get(task_id) or self._running_tools.get(task_id)
+        task = self._running_agents.get(task_id)
         if task and not task.done():
             task.cancel()
             return True
@@ -658,26 +458,17 @@ class ParallelScheduler:
             if not task.done():
                 task.cancel()
                 count += 1
-        for task_id, task in list(self._running_tools.items()):
-            if not task.done():
-                task.cancel()
-                count += 1
         return count
 
     def get_status(self) -> SchedulerStatus:
         """获取调度器状态。"""
         running_agents = sum(1 for t in self._running_agents.values() if not t.done())
-        running_tools = sum(1 for t in self._running_tools.values() if not t.done())
 
         # 估算等待数量（semaphore 的等待者）
         waiting_agents = max(0, len(self._running_agents) - running_agents)
-        waiting_tools = max(0, len(self._running_tools) - running_tools)
 
         return SchedulerStatus(
             running_agents=running_agents,
-            running_tools=running_tools,
             waiting_agents=waiting_agents,
-            waiting_tools=waiting_tools,
             max_agent_concurrency=self._max_agent_concurrency,
-            max_tool_concurrency=self._max_tool_concurrency,
         )

@@ -57,18 +57,20 @@ class PromptLoader:
         """
         # Check cache
         if use_cache and prompt_path in self._cache:
-            prompt = self._cache[prompt_path]
+            prompt: str = self._cache[prompt_path]
             logger.debug(f"Loaded cached prompt: {prompt_path}")
         else:
             # Load from file
-            prompt = self._load_from_file(prompt_path)
-            if prompt is None:
+            loaded = self._load_from_file(prompt_path)
+            if loaded is None:
                 # File not found, use fallback
                 prompt = self._get_fallback_prompt(prompt_path)
                 logger.warning(f"Using fallback prompt for: {prompt_path}")
-            elif use_cache:
-                self._cache[prompt_path] = prompt
-                logger.debug(f"Loaded and cached prompt: {prompt_path}")
+            else:
+                prompt = loaded
+                if use_cache:
+                    self._cache[prompt_path] = prompt
+                    logger.debug(f"Loaded and cached prompt: {prompt_path}")
 
         # Interpolate context
         if context:

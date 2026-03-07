@@ -11,6 +11,7 @@ from mini_coder.memory import (
     NoteCategory,
     NoteStatus,
 )
+from mini_coder.memory.embeddings import FASTEMBED_DEFAULT_MODEL
 
 
 class TestProjectNote:
@@ -200,7 +201,7 @@ class TestProjectNoteEmbeddings:
             content="Content"
         )
 
-        assert note.needs_embedding("all-MiniLM-L6-v2") is True
+        assert note.needs_embedding(FASTEMBED_DEFAULT_MODEL) is True
 
     def test_needs_embedding_when_different_model(self) -> None:
         """Test needs_embedding returns True when model differs."""
@@ -212,7 +213,7 @@ class TestProjectNoteEmbeddings:
             embedding_model="old-model"
         )
 
-        assert note.needs_embedding("all-MiniLM-L6-v2") is True
+        assert note.needs_embedding(FASTEMBED_DEFAULT_MODEL) is True
 
     def test_needs_embedding_when_same_model(self) -> None:
         """Test needs_embedding returns False when model matches."""
@@ -221,24 +222,24 @@ class TestProjectNoteEmbeddings:
             title="Test",
             content="Content",
             embedding=[0.1, 0.2, 0.3],
-            embedding_model="all-MiniLM-L6-v2"
+            embedding_model=FASTEMBED_DEFAULT_MODEL
         )
 
-        assert note.needs_embedding("all-MiniLM-L6-v2") is False
+        assert note.needs_embedding(FASTEMBED_DEFAULT_MODEL) is False
 
     def test_note_with_embedding(self) -> None:
         """Test creating a note with embedding."""
-        embedding = [0.1] * 384  # Typical embedding size
+        embedding = [0.1] * 384  # 典型嵌入维度（fastembed 默认 384）
         note = ProjectNote(
             category=NoteCategory.PATTERN,
             title="Repository Pattern",
             content="Use repository pattern",
             embedding=embedding,
-            embedding_model="all-MiniLM-L6-v2"
+            embedding_model=FASTEMBED_DEFAULT_MODEL
         )
 
         assert note.embedding == embedding
-        assert note.embedding_model == "all-MiniLM-L6-v2"
+        assert note.embedding_model == FASTEMBED_DEFAULT_MODEL
 
 
 class TestProjectNotesManager:
@@ -579,7 +580,7 @@ class TestProjectNotesManagerWithSemanticSearch:
         """Create a manager with semantic search enabled."""
         storage = tmp_path / "notes"
         storage.mkdir()
-        # Semantic search requires sentence-transformers
+        # 语义搜索需要 fastembed 或配置 embedding API
         return ProjectNotesManager(
             storage_path=str(storage),
             enable_semantic_search=True
@@ -589,8 +590,7 @@ class TestProjectNotesManagerWithSemanticSearch:
         self, manager_with_semantic: ProjectNotesManager
     ) -> None:
         """Test that manager initializes with semantic search."""
-        # Semantic search may be None if sentence-transformers not installed
-        # This is expected behavior
+        # 若无可用嵌入后端（fastembed/API），_semantic_search 可能为 None，属预期行为
         manager_with_semantic.set_project("/test/project")
         # Just verify it doesn't crash
         assert manager_with_semantic._enable_semantic_search is True

@@ -279,35 +279,37 @@ class LLMService:
 
 ### 2.2 技术方案
 
-#### 本地 Embedding（推荐）
+#### 本地 Embedding（推荐：fastembed，无 PyTorch）
 
 ```python
-# 文件: src/mini_coder/memory/embeddings.py
+# 文件: src/mini_coder/memory/embeddings.py（当前实现摘要）
 
-from sentence_transformers import SentenceTransformer
+from fastembed import TextEmbedding
 import numpy as np
-from typing import Optional
 
 class LocalEmbeddingService:
-    """本地 Embedding 服务（使用 sentence-transformers）。"""
+    """本地/在线嵌入服务：默认 fastembed，可选配置 embedding API。"""
 
-    def __init__(self, model_name: str = "all-MiniLM-L6-v2"):
-        # 轻量级模型，约 80MB，适合本地运行
-        self.model = SentenceTransformer(model_name)
-        self.dimension = 384  # all-MiniLM-L6-v2 的维度
+    def __init__(self, config=None):
+        # 默认 backend="fastembed"，模型如 BAAI/bge-small-en-v1.5（384 维）
+        # 配置 backend="api" 时使用 OpenAI 兼容 API
+        self.config = config or EmbeddingConfig()
+        self._model = None  # 懒加载
 
     def embed(self, text: str) -> np.ndarray:
-        """生成文本 embedding。"""
-        return self.model.encode(text, normalize_embeddings=True)
+        """生成单条文本 embedding。"""
+        # fastembed: list(self._model.embed([text]))[0]
+        # API: self._client.embeddings.create(...)
+        ...
 
     def embed_batch(self, texts: list[str]) -> np.ndarray:
-        """批量生成 embeddings。"""
-        return self.model.encode(texts, normalize_embeddings=True)
+        """批量生成 embeddings；fastembed 下按 batch_size 分批以控制内存。"""
+        ...
 
     @staticmethod
     def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
         """计算余弦相似度。"""
-        return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
+        return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b)))
 ```
 
 ### 2.3 数据模型扩展
@@ -397,7 +399,7 @@ class SemanticNoteSearch:
 
 | 步骤 | 任务 | 文件 | 复杂度 |
 |------|------|------|--------|
-| 1 | 添加 `sentence-transformers` 依赖 | `pyproject.toml` | 低 |
+| 1 | 添加 `fastembed` 可选依赖（或配置 embedding API） | `pyproject.toml` / `config/llm.yaml` | 低 |
 | 2 | 创建 `LocalEmbeddingService` | `memory/embeddings.py` | 中 |
 | 3 | 扩展 `ProjectNote` 模型 | `memory/project_notes.py` | 低 |
 | 4 | 创建 `SemanticNoteSearch` | `memory/semantic_search.py` | 高 |
@@ -800,10 +802,10 @@ notes:
     confidence_threshold: 0.8
     use_llm: false  # 是否使用 LLM 辅助
 
-  # 语义搜索
+  # 语义搜索（嵌入配置见 config/llm.yaml embeddings 段）
   semantic_search:
     enabled: false  # Phase 3 启用
-    model: "all-MiniLM-L6-v2"
+    # 默认使用 fastembed；backend: "api" 时使用在线 API
     similarity_threshold: 0.7
     index_cache_size: 1000
 
@@ -818,7 +820,7 @@ notes:
 ## 参考资源
 
 - [Hello-Agents 第九章：上下文工程](https://gitee.com/qzl9999/Hello-Agents/blob/main/docs/chapter9/)
-- [sentence-transformers 文档](https://www.sbert.net/)
+- [fastembed 文档](https://github.com/qdrant/fastembed)（默认本地嵌入）
 - mini-coder 现有实现:
   - `src/mini_coder/memory/project_notes.py`
   - `src/mini_coder/memory/context_builder.py`
@@ -853,10 +855,10 @@ notes:
 - `CATEGORY_AFFINITY` - 类别间关系推断规则
 
 #### 4. 语义搜索 ✅
-- `src/mini_coder/memory/embeddings.py` - 本地嵌入服务
-- `LocalEmbeddingService` - sentence-transformers 封装
+- `src/mini_coder/memory/embeddings.py` - 嵌入服务（默认 fastembed，可选 API）
+- `LocalEmbeddingService` - fastembed / OpenAI 兼容 API 双后端，批处理受 `batch_size` 限制
 - `cosine_similarity()` - 静态方法计算向量相似度
-- 优雅降级 - 无 sentence-transformers 时返回零向量
+- 优雅降级 - 无可用后端时回退关键词搜索或词重叠相似度
 - `src/mini_coder/memory/semantic_search.py` - 语义搜索服务
 - `SemanticNoteSearch` - `build_index()`, `search()`, `find_similar()`
 
@@ -877,7 +879,8 @@ notes:
 #### 7. 依赖 ✅
 - `pyproject.toml` 更新
   - `numpy>=1.24.0` - 核心依赖
-  - `sentence-transformers>=2.2.0` - 可选依赖 (semantic 组)
+  - `fastembed>=0.2.0` - 可选依赖 (semantic 组，默认本地嵌入)
+  - `openai>=1.0.0` - 可选依赖 (semantic-api 组，使用 embedding API 时)
 
 ### 测试覆盖
 

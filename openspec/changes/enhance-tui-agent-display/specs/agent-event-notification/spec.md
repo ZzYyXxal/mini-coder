@@ -10,14 +10,10 @@
 
 当 Agent 开始执行时，必须发送 `agent_started` 事件。
 
-**Event Data:**
-```json
-{
-  "event": "agent_started",
-  "agent_type": "explorer|planner|coder|reviewer|bash",
-  "timestamp": 1234567890.123
-}
-```
+**Event Data:**  
+（实现中回调签名为 `(agent_type, "started", None)`，agent_type 为 SubAgentType 枚举。）
+
+- `agent_type`: explorer | planner | coder | reviewer | bash（Tester 功能已由 Bash 子代理融合取代，不单独列出）
 
 **Trigger Points:**
 - Orchestrator.dispatch() 创建子代理后
@@ -27,16 +23,11 @@
 
 当 Agent 执行完成时，必须发送 `agent_completed` 事件。
 
-**Event Data:**
-```json
-{
-  "event": "agent_completed",
-  "agent_type": "explorer|planner|coder|reviewer|bash",
-  "success": true|false,
-  "output": "执行结果摘要",
-  "timestamp": 1234567890.456
-}
-```
+**Event Data:**  
+（实现中回调签名为 `(agent_type, "completed", result)`，result 为 EnhancedAgentResult。）
+
+- `agent_type`: explorer | planner | coder | reviewer | bash
+- 成功/失败由 result.success 表达
 
 **Trigger Points:**
 - SubAgent.execute() 方法返回时

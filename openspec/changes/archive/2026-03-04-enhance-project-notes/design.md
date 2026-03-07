@@ -48,21 +48,22 @@ The mini-coder project has an existing `ProjectNotes` system (`src/mini_coder/me
 | LLM extraction | Smart, handles edge cases | Latency, cost, non-deterministic | 📋 Phase 2 optional |
 | Hybrid | Best of both | Complexity | 📋 Future consideration |
 
-### D2: Local Embeddings with sentence-transformers
+### D2: Local Embeddings (fastembed default, optional API)
 
-**Decision**: Use `sentence-transformers` with `all-MiniLM-L6-v2` model for local embeddings.
+**Decision**: Use **fastembed** (ONNX, no PyTorch) as default for local embeddings; optionally use OpenAI-compatible embedding API when configured.
 
 **Rationale**:
-- No API dependency or cost
-- Model size ~80MB, acceptable for local use
-- 384-dimensional vectors, efficient storage
-- Good quality for semantic similarity
+- fastembed: no PyTorch/torch dependency, lower memory and startup cost
+- 384-dimensional vectors (e.g. BAAI/bge-small-en-v1.5), efficient storage
+- Optional API (e.g. DashScope text-embedding-v4) for higher quality when configured
+- Configurable `batch_size` to limit memory usage
 
 **Alternatives Considered**:
 | Approach | Pros | Cons | Verdict |
 |----------|------|------|---------|
-| sentence-transformers (local) | No API, no cost, fast | Model download, memory | ✅ Chosen |
-| OpenAI/Zhipu embeddings API | High quality | Cost, latency, API dependency | ❌ Rejected |
+| fastembed (local, ONNX) | No torch, low memory, fast | Model download | ✅ Chosen (default) |
+| Embedding API (DashScope/OpenAI) | High quality | Cost, latency, API key | ✅ Optional via config |
+| sentence-transformers (PyTorch) | Mature | Heavy torch dependency | ❌ Replaced by fastembed |
 | ChromaDB with embeddings | Full vector DB | Overkill for note count | 📋 Future consideration |
 
 ### D3: Embedding Storage in ProjectNote Model
@@ -101,12 +102,12 @@ class ProjectNote(BaseModel):
 
 ### D5: Feature Flags for Optional Dependencies
 
-**Decision**: Make `sentence-transformers` optional with feature flags.
+**Decision**: Make embedding backend optional (fastembed or API); semantic search degrades gracefully when no backend is available.
 
 **Rationale**:
-- Reduces required dependencies for basic usage
-- Graceful degradation if not installed
-- Clear error messages when features require installation
+- Reduces required dependencies for basic usage (install fastembed or configure API)
+- Graceful degradation if neither is available
+- Clear error messages when semantic search requires installation or configuration
 
 **Configuration**:
 ```yaml
@@ -114,7 +115,7 @@ notes:
   auto_extract:
     enabled: true
   semantic_search:
-    enabled: false  # Requires sentence-transformers
+    enabled: false  # Requires fastembed or embedding API
   relations:
     enabled: true
 ```
@@ -209,11 +210,11 @@ tests/memory/
 ## Risks / Trade-offs
 
 ### Risk 1: Embedding Model Download Size
-**Risk**: `all-MiniLM-L6-v2` is ~80MB, may slow first-time setup.
+**Risk**: Default fastembed model (e.g. BAAI/bge-small-en-v1.5) has first-time download, may slow first use.
 **Mitigation**:
 - Document in README
-- Lazy loading - only download when semantic search enabled
-- Show progress bar during download
+- Lazy loading - only load when semantic search is used
+- Configurable `batch_size` to limit memory
 
 ### Risk 2: Extraction False Positives
 **Risk**: Pattern matching may extract incorrect notes.

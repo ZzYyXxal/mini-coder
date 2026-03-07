@@ -41,18 +41,14 @@ class TestParallelScheduler:
         """测试默认参数初始化。"""
         scheduler = ParallelScheduler()
         assert scheduler._max_agent_concurrency == DEFAULT_MAX_CONCURRENCY
-        assert scheduler._max_tool_concurrency == DEFAULT_MAX_CONCURRENCY
 
     def test_init_custom_params(self):
         """测试自定义参数初始化。"""
         scheduler = ParallelScheduler(
             max_agent_concurrency=2,
-            max_tool_concurrency=1,
             default_agent_timeout=120.0,
-            default_tool_timeout=30.0,
         )
         assert scheduler._max_agent_concurrency == 2
-        assert scheduler._max_tool_concurrency == 1
 
     def test_init_invalid_concurrency(self):
         """测试无效并发参数。"""
@@ -60,8 +56,6 @@ class TestParallelScheduler:
             ParallelScheduler(max_agent_concurrency=0)
         with pytest.raises(ValueError):
             ParallelScheduler(max_agent_concurrency=4)
-        with pytest.raises(ValueError):
-            ParallelScheduler(max_tool_concurrency=5)
 
     def test_get_status(self):
         """测试状态获取。"""
@@ -69,7 +63,6 @@ class TestParallelScheduler:
         status = scheduler.get_status()
         assert isinstance(status, SchedulerStatus)
         assert status.running_agents == 0
-        assert status.running_tools == 0
         assert status.max_agent_concurrency == DEFAULT_MAX_CONCURRENCY
 
     @pytest.mark.asyncio

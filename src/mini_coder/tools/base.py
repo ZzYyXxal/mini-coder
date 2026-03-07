@@ -222,7 +222,7 @@ class BaseTool(ABC):
         name: str,
         description: str,
         prompt_path: Optional[str] = None,
-        event_callback: Optional[Callable[[str, Dict[str, Any]], None]] = None,
+        event_callback: Optional[Callable[[str, str, Dict[str, Any]], None]] = None,
         config: Optional[Dict[str, Any]] = None,
     ):
         """Initialize BaseTool
@@ -232,6 +232,7 @@ class BaseTool(ABC):
             description: Tool description
             prompt_path: Path to prompt template (relative to prompts/)
             event_callback: Callback for tool events (for TUI display)
+                         Signature: callback(tool_name: str, event_type: str, data: Dict[str, Any])
             config: Tool configuration dict
         """
         self.name = name

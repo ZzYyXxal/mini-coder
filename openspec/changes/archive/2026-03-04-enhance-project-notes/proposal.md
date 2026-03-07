@@ -18,7 +18,7 @@ This change addresses three key gaps identified through comparison with Hello-Ag
 - Integrate extraction into `LLMService.chat_stream` pipeline
 
 ### Semantic Search
-- Add embedding generation for notes using sentence-transformers
+- Add embedding generation for notes using embedding backend (default: fastembed; optional: API)
 - Implement vector similarity search for semantic matching
 - Support hybrid search (keyword + semantic)
 - Add index building and persistence
@@ -59,7 +59,7 @@ This change addresses three key gaps identified through comparison with Hello-Ag
 - `src/mini_coder/memory/semantic_search.py` - Semantic search implementation
 
 ### Dependencies
-- `sentence-transformers` - For local embeddings (optional, feature-gated)
+- `fastembed` - For local embeddings (optional, default backend); `openai` - For embedding API (optional)
 
 ### Configuration
 - `config/memory.yaml` - Add notes enhancement options (auto_extract, semantic_search, relations)

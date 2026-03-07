@@ -324,17 +324,14 @@ tool_calls = [
 │   │                  ParallelScheduler                           │  │
 │   │  ┌───────────────────────────────────────────────────────┐  │  │
 │   │  │  _agent_semaphore: asyncio.Semaphore(3)               │  │  │
-│   │  │  _tool_semaphore: asyncio.Semaphore(3)                │  │  │
-│   │  │  _running_tasks: Dict[str, asyncio.Task]              │  │  │
-│   │  │  _task_timeouts: Dict[str, float]                     │  │  │
+│   │  │  _running_agents: Dict[str, asyncio.Task]             │  │  │
+│   │  │  _agent_timeouts: Dict[str, float]                    │  │  │
 │   │  └───────────────────────────────────────────────────────┘  │  │
 │   │                                                              │  │
 │   │  Methods:                                                    │  │
-│   │  - schedule_agent_task(task: TaskBrief) -> SubagentResult  │  │
+│   │  - schedule_agent_single(task: TaskBrief) -> SubagentResult│  │
 │   │  - schedule_agent_batch(group: ParallelTaskGroup)          │  │
 │   │      -> ParallelResultGroup                                  │  │
-│   │  - schedule_tool_batch(batch: ToolBatchRequest)            │  │
-│   │      -> ToolBatchResult                                      │  │
 │   │  - cancel_task(task_id: str) -> bool                        │  │
 │   │  - get_status() -> SchedulerStatus                          │  │
 │   └─────────────────────────────────────────────────────────────┘  │
@@ -355,25 +352,24 @@ tool_calls = [
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
-### 8.2 核心类设计
+**职责分离**:
+- `ParallelScheduler`: Agent 级调度，管理多个 Agent 的并发执行
+- `ToolScheduler`: Tool 级调度，管理单个 Agent 内的 Tool 并发调用
+
+### 8.2 ParallelScheduler 核心类设计
 
 ```python
 class ParallelScheduler:
-    """统一并行调度器，管理 Agent 级和 Tool 级并发"""
+    """Agent 级并行调度器，管理多个 Agent 的并发执行"""
 
     def __init__(
         self,
         max_agent_concurrency: int = 3,
-        max_tool_concurrency: int = 3,
         default_agent_timeout: float = 300.0,
-        default_tool_timeout: float = 60.0,
     ):
         self._agent_semaphore = asyncio.Semaphore(max_agent_concurrency)
-        self._tool_semaphore = asyncio.Semaphore(max_tool_concurrency)
         self._running_agents: Dict[str, asyncio.Task] = {}
-        self._running_tools: Dict[str, asyncio.Task] = {}
         self._default_agent_timeout = default_agent_timeout
-        self._default_tool_timeout = default_tool_timeout
 
     async def schedule_agent_batch(
         self,
@@ -444,13 +440,62 @@ class ParallelScheduler:
 
 ### 8.3 资源管理
 
-| 资源类型 | 限制 | 管理机制 |
-|---------|------|---------|
-| Agent 并发 | max 3 | `asyncio.Semaphore(3)` |
-| Tool 并发 | max 3 | `asyncio.Semaphore(3)` |
-| 单任务超时 | 默认 300s | `asyncio.wait_for()` |
-| 批量超时 | 默认 600s | `asyncio.wait(timeout=...)` |
-| 内存 | 无硬限制 | 依赖 Python GC |
+| 资源类型 | 限制 | 管理机制 | 调度器 |
+|---------|------|---------|--------|
+| Agent 并发 | max 3 | `asyncio.Semaphore(3)` | ParallelScheduler |
+| Tool 并发 | max 3 | `asyncio.Semaphore(3)` | ToolScheduler |
+| 单任务超时 | 默认 300s | `asyncio.wait_for()` | ParallelScheduler |
+| Tool 调用超时 | 默认 60s | `asyncio.wait_for()` | ToolScheduler |
+| 批量超时 | 默认 600s | `asyncio.wait(timeout=...)` | ParallelScheduler |
+| 内存 | 无硬限制 | 依赖 Python GC | - |
+
+### 8.4 ToolScheduler 核心类设计
+
+```python
+class ToolScheduler:
+    """Agent 内部的 Tool 并行调度器"""
+
+    def __init__(
+        self,
+        max_concurrency: int = 3,
+        default_timeout: float = 60.0,
+    ):
+        self._semaphore = asyncio.Semaphore(max_concurrency)
+        self._default_timeout = default_timeout
+        self._execution_history: List[ToolBatchResult] = []
+
+    async def execute_batch(
+        self,
+        tool_calls: List[ToolCall],
+        tool_registry: Dict[str, BaseTool],
+        timeout: Optional[float] = None,
+    ) -> ToolBatchResult:
+        """执行一批 Tool 调用，支持 DAG 依赖"""
+
+    async def execute_single(
+        self,
+        tool_call: ToolCall,
+        tool_registry: Dict[str, BaseTool],
+        timeout: Optional[float] = None,
+    ) -> ToolCallResult:
+        """执行单个 Tool 调用"""
+
+    def _build_dependency_graph(self, tool_calls: List[ToolCall]) -> DependencyGraph:
+        """构建依赖图并计算执行批次"""
+
+    def _resolve_placeholders(
+        self,
+        args: Dict[str, Any],
+        previous_outputs: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """解析参数中的 placeholder"""
+```
+
+**关键特性**:
+1. **DAG 依赖**: Tool 调用可以声明 `depends_on`，形成有向无环图
+2. **拓扑排序**: 自动计算执行批次，同层并行执行
+3. **Placeholder 解析**: 支持 `{{call_id.output.field}}` 语法引用前序调用结果
+4. **LLM 响应解析**: `parse_tool_calls_from_llm()` 从 LLM 响应提取 tool_calls
 
 ## 九、错误处理与恢复策略
 
@@ -540,16 +585,20 @@ if result_group.partial_success:
 
 ### 10.3 并行调度器（已完成）
 
-- [x] 创建 `agents/scheduler.py`，实现 `ParallelScheduler` 类
+- [x] 创建 `agents/scheduler.py`，实现 `ParallelScheduler` 类（Agent 级调度）
   - [x] `schedule_agent_single()` - 单任务异步执行
   - [x] `schedule_agent_batch()` - 批量并行执行
-  - [x] `schedule_tool_batch()` - Tool 批量并行执行
-  - [x] `_agent_semaphore` / `_tool_semaphore` 并发控制
+  - [x] `_agent_semaphore` 并发控制
   - [x] 超时控制和错误处理
-- [x] 创建 `agents/tool_scheduler.py`，实现 Agent 内部的 `ToolScheduler`
-  - [x] DAG 依赖分析
+  - [x] fail_fast 策略（支持 FIRST_COMPLETED + 取消）
+- [x] 创建 `agents/tool_scheduler.py`，实现独立的 `ToolScheduler` 类（Tool 级调度）
+  - [x] `execute_batch()` - 批量 Tool 执行
+  - [x] `execute_single()` - 单个 Tool 执行
+  - [x] DAG 依赖分析 (`_build_dependency_graph`)
   - [x] 拓扑排序分批执行
   - [x] 同层任务并行执行
+  - [x] Placeholder 参数解析 (`_resolve_placeholders`)
+  - [x] LLM 响应解析 (`parse_tool_calls_from_llm`)
 
 ### 10.4 Orchestrator 集成（已完成）
 

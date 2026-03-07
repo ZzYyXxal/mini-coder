@@ -22,18 +22,31 @@ providers:
     base_url: "https://api.openai.com/v1/"
     model: "gpt-4o-mini"
 
-  # 阿里云百炼（DashScope）- 千问等模型，OpenAI 兼容接口（需使用 compatible-mode 域名）
-  # 地域可选：北京 dashscope.aliyuncs.com | 新加坡 dashscope-intl.aliyuncs.com | 美国 dashscope-us.aliyuncs.com
+  # 阿里云百炼（DashScope）- 编程/千问等模型
   dashscope:
     api_key: "DASHSCOPE_API_KEY"  # 通过环境变量 DASHSCOPE_API_KEY 设置（百炼控制台获取）
-    base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    base_url: "https://coding.dashscope.aliyuncs.com/v1"  # 勿改：coding 接口域名
     model: "glm-5"  # 可选: qwen-turbo, qwen-plus, qwen-max, qwen3-max 等
+    timeout: 120    # HTTP 读超时（秒），Coder 等长回复建议 ≥120，避免 "The read operation timed out"
 
   custom:
     api_key: ""
     base_url: ""
     model: ""
     headers: {}
+
+# Embeddings（语义搜索）：默认 fastembed，可选 API
+# 限制内存：使用 fastembed 时设 batch_size
+embeddings:
+  backend: "fastembed"
+  batch_size: 32   # 每批条数，按需调小以省内存
+
+# 显式使用 embedding API 时改为：
+# embeddings:
+#   backend: "api"   # 或 use_api: true
+#   api_key: "DASHSCOPE_EMBEDDING_API_KEY"
+#   base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+#   model: "text-embedding-v4"
 
 # 配置说明：
 # - 所有提供商使用 OpenAI SDK 兼容接口

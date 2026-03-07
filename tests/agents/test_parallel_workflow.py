@@ -39,7 +39,6 @@ class TestOrchestratorParallelDispatch:
         """测试异步单任务派发。"""
         config = WorkflowConfig(
             max_agent_concurrency=3,
-            max_tool_concurrency=3,
             timeout_seconds=30.0,
         )
         orchestrator = WorkflowOrchestrator(
@@ -63,7 +62,6 @@ class TestOrchestratorParallelDispatch:
         """测试异步并行任务派发。"""
         config = WorkflowConfig(
             max_agent_concurrency=3,
-            max_tool_concurrency=3,
             timeout_seconds=30.0,
         )
         orchestrator = WorkflowOrchestrator(
@@ -129,7 +127,6 @@ class TestOrchestratorParallelDispatch:
         """测试获取调度器状态。"""
         config = WorkflowConfig(
             max_agent_concurrency=2,
-            max_tool_concurrency=2,
         )
         orchestrator = WorkflowOrchestrator(
             llm_service=None,
@@ -139,9 +136,7 @@ class TestOrchestratorParallelDispatch:
         status = orchestrator.get_scheduler_status()
 
         assert status["max_agent_concurrency"] == 2
-        assert status["max_tool_concurrency"] == 2
         assert status["running_agents"] == 0
-        assert status["running_tools"] == 0
 
 
 class TestToolParallelExecution:
@@ -311,7 +306,6 @@ class TestFullWorkflow:
         # 创建 Orchestrator
         config = WorkflowConfig(
             max_agent_concurrency=3,
-            max_tool_concurrency=3,
             timeout_seconds=60.0,
         )
         orchestrator = WorkflowOrchestrator(

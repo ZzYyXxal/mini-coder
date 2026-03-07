@@ -7,6 +7,7 @@ for the mini-coder TUI application.
 import argparse
 import logging
 import sys
+from datetime import datetime
 from pathlib import Path
 
 from mini_coder.tui.models.config import (AnimationSpeed, Config,
@@ -63,6 +64,14 @@ def parse_arguments() -> argparse.Namespace:
         version=f"%(prog)s {get_version()}",
     )
 
+    parser.add_argument(
+        "--log-level",
+        type=str,
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+        default="DEBUG",
+        help="日志级别，写入 logs/tui_*.log（默认: DEBUG，含 [LLM REQ]/[LLM RSP] 预览）",
+    )
+
     return parser.parse_args()
 
 
@@ -84,21 +93,26 @@ def setup_logging(level: int = logging.DEBUG) -> None:
     """Configure logging for the application.
 
     Logs go only to a file under a log directory (no console output),
-    so the TUI interface is not cluttered. Log file: logs/tui.log (under
-    cwd) or ~/.mini-coder/logs/tui.log.
+    so the TUI interface is not cluttered. Log file name includes creation
+    timestamp, e.g. logs/tui_20260306_154855.log (under cwd) or
+    ~/.mini-coder/logs/tui_20260306_154855.log.
 
     Args:
         level: Logging level for the file (default: DEBUG).
     """
-    fmt = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    # 包含文件名与行号，便于定位日志来源
+    fmt = "%(asctime)s - %(name)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s"
     datefmt = "%Y-%m-%d %H:%M:%S"
     root = logging.getLogger()
     root.handlers.clear()
     root.setLevel(level)
+    # 文件名带创建时间戳，便于按会话区分
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_basename = f"tui_{ts}.log"
     for log_dir in (Path.cwd() / "logs", Path.home() / ".mini-coder" / "logs"):
         try:
             log_dir.mkdir(parents=True, exist_ok=True)
-            log_path = log_dir / "tui.log"
+            log_path = log_dir / log_basename
             fh = logging.FileHandler(log_path, mode="a", encoding="utf-8")
             fh.setLevel(level)
             fh.setFormatter(logging.Formatter(fmt, datefmt=datefmt))
@@ -147,7 +161,8 @@ def main() -> int:
         Exit code (0 for success, non-zero for error).
     """
     args = parse_arguments()
-    setup_logging()
+    level = getattr(logging, args.log_level.upper(), logging.DEBUG)
+    setup_logging(level=level)
 
     try:
         config = load_config_with_args(args)

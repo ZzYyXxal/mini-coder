@@ -27,8 +27,13 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# 语义检索默认使用 fastembed（无 PyTorch，内存占用小）
 semantic = [
-    "sentence-transformers>=2.2.0",
+    "fastembed>=0.2.0",
+]
+# 使用在线 embedding API（DashScope/OpenAI 等）时安装
+semantic-api = [
+    "openai>=1.0.0",
 ]
 dev = [
     "pytest>=7.0.0",

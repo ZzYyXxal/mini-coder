@@ -98,7 +98,7 @@ class WorkflowOrchestrator:
 
 ```python
 class AgentDisplay(Enum):
-    """Agent 显示枚举"""
+    """子代理显示枚举（与 SubAgentType 对应；Tester 功能已由 Bash 融合取代，不单独列出）"""
     EXPLORER = "Explorer"
     PLANNER = "Planner"
     CODER = "Coder"
@@ -239,53 +239,61 @@ User Request
 
 ## Implementation Details
 
+（以下与当前代码实现保持一致，artifact 不采用其他约定。）
+
 ### Event Notification Implementation
+
+Agent 事件回调的签名为 **三参数**：`(agent_type, event_type, result)`。
 
 ```python
 # In orchestrator.py
-def _notify_agent_started(self, agent_type: SubAgentType):
-    """通知 Agent 开始事件"""
+def _notify_agent_started(self, agent_type: SubAgentType) -> None:
+    """通知子代理开始执行"""
     for callback in self._agent_callbacks:
         try:
-            callback({
-                "event": "agent_started",
-                "agent_type": agent_type.value,
-                "timestamp": time.time()
-            })
-        except Exception as e:
-            logger.exception(f"Agent callback error: {e}")
+            callback(agent_type, "started", None)
+        except Exception:
+            logger.exception("Agent started callback error")
 
-def _notify_agent_completed(self, agent_type: SubAgentType, result):
-    """通知 Agent 完成事件"""
+def _notify_agent_completed(self, agent_type: SubAgentType, result: EnhancedAgentResult) -> None:
+    """通知子代理执行完成"""
     for callback in self._agent_callbacks:
         try:
-            callback({
-                "event": "agent_completed",
-                "agent_type": agent_type.value,
-                "success": result.success,
-                "timestamp": time.time()
-            })
-        except Exception as e:
-            logger.exception(f"Agent callback error: {e}")
+            callback(agent_type, "completed", result)
+        except Exception:
+            logger.exception("Agent completed callback error")
 ```
+
+- `agent_type`: `SubAgentType` 枚举值（explorer / planner / coder / reviewer / bash）。
+- `event_type`: `"started"` 或 `"completed"`。
+- `result`: 仅当 `event_type == "completed"` 时传入 `EnhancedAgentResult`，否则为 `None`。
 
 ### TUI Callback Registration
 
+TUI 注册的回调需与上述签名一致。
+
 ```python
 # In console_app.py
-def setup_agent_callbacks(self, orchestrator: WorkflowOrchestrator):
-    """设置 Agent 回调"""
-    def on_agent_event(event: dict):
-        agent = event['agent_type'].upper()
-        if event['event'] == 'agent_started':
-            self._current_agent = agent
-            self._console.print(f"\n[bold cyan][{agent}] 开始执行...[/bold cyan]")
-        elif event['event'] == 'agent_completed':
-            status = "✓ 完成" if event['success'] else "✗ 失败"
-            self._console.print(f"[bold cyan][{agent}] {status}[/bold cyan]")
+def on_agent_event(self, agent_type: Any, event_type: str, result: Optional[Any] = None) -> None:
+    """子代理事件回调（与 orchestrator 三参数签名一致）"""
+    agent_display = AgentDisplay.from_agent_type(agent_type)
+    if event_type == "started":
+        self._current_agent = agent_display
+        self._console.print(f"[bold cyan][{agent_display.value}] 开始执行...[/bold cyan]")
+    elif event_type == "completed":
+        status = "完成" if result and result.success else "失败"
+        self._console.print(f"[dim][{agent_display.value}] 执行{status}[/dim]")
+        self._current_agent = AgentDisplay.MAIN  # 恢复为主 Agent
 
-    orchestrator.register_agent_callback(on_agent_event)
+# 注册方式
+orchestrator.register_agent_callback(self.on_agent_event)
 ```
+
+### 工具环与后续扩展
+
+- **现状**：Planner/Coder 等 Enhanced 系子代理在 `execute()` 中有工具环（LLM → 工具调用 → 再 LLM），可上报 TOOL_STARTING/TOOL_COMPLETED；Explorer/Reviewer 等 base 系子代理当前为单次 LLM 调用，无工具环，故无工具调用事件。
+- **必要性**：若希望 Explorer/Reviewer 在 TUI 中也能显示其调用的 Read/Grep 等工具，需要为其实现工具环（或在其调用工具的单点注入事件上报），属于可观测性增强。
+- **结论**：工具环在 Explorer/Reviewer 上的实现**列入后续扩展**（如 Phase 2 或独立 task），不在 Phase 1 范围内；Phase 1 仅保证已具备工具环的子代理（Planner/Coder 等）正常上报，其余子代理可暂不显示工具日志。
 
 ## Testing Strategy
 

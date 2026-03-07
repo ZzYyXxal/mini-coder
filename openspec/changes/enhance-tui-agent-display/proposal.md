@@ -5,7 +5,7 @@
 当前 TUI 显示存在以下问题：
 
 1. **显示的是模式而非 Agent** - TUI 显示 PLAN/CODE/EXECUTE 模式，但用户无法知道实际是哪个 Agent 在处理请求
-2. **缺少 Agent 流转可视化** - 用户看不到 Agent 之间的切换过程（Explorer → Planner → Coder → Reviewer → Bash）
+2. **缺少 Agent 流转可视化** - 用户看不到子代理之间的切换过程（Explorer → Planner → Coder → Reviewer → Bash；注：Tester 功能已由 Bash 子代理融合取代）
 3. **缺少工具使用显示** - 用户看不到正在使用的工具（Read/Grep/Bash 等）
 4. **缺少上下文信息** - 没有 Token 使用、上下文组成等信息显示
 5. **缺少工作目录隔离** - mini-coder 可能读取/修改自身代码，存在安全隐患
@@ -14,8 +14,8 @@
 
 ### Phase 1: MVP + 安全（本 change 范围）
 
-- [ ] 显示当前 Agent 名称（Explorer/Planner/Coder/Reviewer/Bash）
-- [ ] 显示 Agent 流转过程（开始/完成状态）
+- [ ] 显示当前子代理名称（Explorer/Planner/Coder/Reviewer/Bash；Tester 已由 Bash 取代）
+- [ ] 显示子代理流转过程（开始/完成状态）
 - [ ] 显示正在使用的工具（工具调用日志）
 - [ ] 工作目录隔离和显示
 
@@ -54,7 +54,7 @@
 1. 用户在 TUI 中可以看到当前是哪个 Agent 在处理
 2. 用户可以看到 Agent 流转过程（A 完成 → B 开始）
 3. 用户可以看到正在使用的工具和参数
-4. 工作目录隔离生效，Agent 无法访问工作目录外的文件
+4. 工作目录隔离生效，工具无法访问工作目录外的路径（执行前校验，拒绝则返回明确错误）
 
 ## Stakeholders
 

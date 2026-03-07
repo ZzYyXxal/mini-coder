@@ -1,241 +1,304 @@
-# Tools Framework Architecture Design
+# 工具框架架构设计
 
-> **Version**: 1.0
-> **Created**: 2026-03-06
-> **Status**: Design Complete
-> **Design Goal**: Implement "Code Framework + Dynamic Prompt Injection" pattern for tools, reference Agent architecture
-
----
-
-## 1. Architecture Overview
-
-### 1.1 Design Decision: Memory is NOT a Tool
-
-After careful analysis, we decided that **Memory should remain as independent infrastructure, not be implemented as a Tool**. The reasons are:
-
-| Reason | Explanation |
-|--------|-------------|
-| **1. Infrastructure vs. Capability** | Memory is context management infrastructure, not an LLM-callable capability. Tools are for LLM to invoke; Memory is for session state management. |
-| **2. Access Pattern Difference** | Tools follow "request-response" pattern (LLM initiates); Memory requires automatic triggering (compression at 92% threshold, transparent read/write). |
-| **3. Security Boundary** | Tools have security filters (ReadOnly/FullAccess); Memory access control should be handled by session management layer, not ToolFilter. |
-| **4. Implementation Complexity** | Implementing Memory as Tool requires internal calls (Main Agent → Memory Tool), increasing complexity. Direct method calls are more efficient. |
-
-### 1.2 Memory vs. Command Tool Comparison
-
-| Aspect | Memory (Infrastructure) | Command Tool |
-|--------|------------------------|--------------|
-| **Trigger Mechanism** | Auto-triggered (threshold-based) | LLM invoked |
-| **Access Pattern** | Read/Write via method calls | Request-Response via tool call |
-| **Security Model** | Session-based access control | Command whitelist/blacklist |
-| **Implementation** | ContextMemoryManager class | CommandTool class |
-| **State Management** | Persistent session state | Stateless execution |
-| **Filter Support** | Not applicable | ToolFilter (ReadOnly/FullAccess) |
+> **版本**: 2.0
+> **更新日期**: 2026-03-06
+> **状态**: 已实现
+> **设计目标**: 实现工具的"代码框架 + 动态提示词注入"模式
 
 ---
 
-## 2. BaseTool 2.0 Framework Design
+## 1. 架构概述
 
-### 2.1 Design Goals
+### 1.1 设计决策：Memory 不是 Tool
 
-1. **Dynamic Prompt Loading**: Support loading tool-specific prompts from files (`prompts/tools/*.md`)
-2. **Event Callback Support**: Enable TUI to display tool execution progress
-3. **Configuration Driven**: Tool behavior configurable via `tools.yaml`
-4. **Backward Compatible**: Preserve existing Tool interface
+经过仔细分析，我们决定 **Memory 应该保持为独立基础设施，而不是实现为 Tool**。原因如下：
 
-### 2.2 Architecture Diagram
+| 原因 | 说明 |
+|------|------|
+| **1. 基础设施 vs 能力** | Memory 是上下文管理基础设施，不是 LLM 可调用的能力。Tool 是供 LLM 调用的；Memory 是用于会话状态管理。 |
+| **2. 访问模式差异** | Tool 遵循"请求-响应"模式（LLM 发起）；Memory 需要自动触发（92% 阈值压缩，透明读写）。 |
+| **3. 安全边界** | Tool 有安全过滤器（ReadOnly/FullAccess）；Memory 访问控制应由会话管理层处理，而非 ToolFilter。 |
+| **4. 实现复杂性** | 将 Memory 实现为 Tool 需要内部调用（Main Agent → Memory Tool），增加复杂性。直接方法调用更高效。 |
+
+### 1.2 当前实现状态
+
+| 组件 | 状态 | 描述 |
+|------|------|------|
+| **BaseTool 2.0** | ✅ 已实现 | 支持动态提示词加载的抽象基类 |
+| **PromptLoader** | ✅ 已实现 | 从 `prompts/tools/*.md` 加载提示词，支持插值 |
+| **CommandTool v2.0** | ✅ 已实现 | 已迁移到 BaseTool 2.0，支持事件回调 |
+| **ToolEventAdapter** | ✅ 已实现 | 桥接工具事件到 TUI 回调 |
+| **ToolFilter** | ✅ 已存在 | ReadOnly, FullAccess, BashRestricted 过滤器 |
+
+---
+
+## 2. 工具模块架构
+
+### 2.1 模块结构
+
+```
+src/mini_coder/tools/
+├── __init__.py              # 模块导出
+├── base.py                  # BaseTool 2.0 + Tool v1.0 (向后兼容)
+├── command.py               # CommandTool v2.0
+├── executor.py              # SafeExecutor - subprocess 封装
+├── security.py              # SecurityLevel - 黑名单/白名单
+├── permission.py            # PermissionService - 用户确认
+├── filter.py                # ToolFilter 实现
+├── prompt_loader.py         # 动态提示词加载
+└── event_adapter.py         # ToolEventAdapter 用于 TUI 集成
+```
+
+### 2.2 类层次结构
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                         BaseTool 2.0 Framework                               │
+│                           工具模块架构                                        │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                             │
 │  ┌─────────────────────────────────────────────────────────────────────┐   │
-│  │                        BaseTool (Abstract)                           │   │
+│  │                        Tool (v1.0) - 旧版本                          │   │
+│  │                        BaseTool (v2.0) - 新版本                      │   │
 │  ├─────────────────────────────────────────────────────────────────────┤   │
-│  │  - name: str                                                         │   │
-│  │  - description: str                                                  │   │
-│  │  - prompt_loader: PromptLoader                                       │   │
-│  │  - event_callback: Optional[Callable]                                │   │
+│  │  共同接口:                                                           │   │
+│  │  - run(parameters) -> ToolResponse                                  │   │
+│  │  - get_parameters() -> list[ToolParameter]                          │   │
 │  │                                                                      │   │
-│  │  + run(parameters) -> ToolResponse          [Abstract]              │   │
-│  │  + get_parameters() -> list[ToolParameter]  [Abstract]              │   │
-│  │  + get_system_prompt() -> str                                        │   │
-│  │  + notify_event(event_type, data)                                    │   │
+│  │  BaseTool 2.0 新增:                                                  │   │
+│  │  - get_system_prompt(context) -> str                                │   │
+│  │  - notify_event(event_type, data)                                   │   │
+│  │  - get_config(key, default) -> Any                                  │   │
+│  │  - to_dict() -> Dict                                                │   │
 │  └─────────────────────────────────────────────────────────────────────┘   │
 │                                      │                                     │
-│                    ┌─────────────────┼─────────────────┐                  │
-│                    │                 │                 │                  │
-│                    ▼                 ▼                 ▼                  │
-│          ┌────────────────┐ ┌────────────────┐ ┌────────────────┐        │
-│          │   CommandTool  │ │   FutureTool1  │ │   FutureTool2  │        │
-│          │   (Migrated)   │ │   (New)        │ │   (New)        │        │
-│          └────────────────┘ └────────────────┘ └────────────────┘        │
+│                                      ▼                                     │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                        CommandTool (v2.0)                            │   │
+│  ├─────────────────────────────────────────────────────────────────────┤   │
+│  │  组件:                                                               │   │
+│  │  ├── SecurityLevel (黑名单/白名单/确认)                             │   │
+│  │  ├── PermissionService (用户审批)                                   │   │
+│  │  └── SafeExecutor (带超时/输出限制的 subprocess)                    │   │
+│  │                                                                      │   │
+│  │  事件: start → security_check → [permission_request] → complete     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
 │                                                                             │
 │  ┌─────────────────────────────────────────────────────────────────────┐   │
-│  │                      Supporting Components                           │   │
+│  │                          支撑组件                                    │   │
 │  ├─────────────────────────────────────────────────────────────────────┤   │
-│  │  - PromptLoader: Load prompts from prompts/tools/*.md               │   │
-│  │  - ToolFilter: Control tool access (ReadOnly/FullAccess/Custom)     │   │
-│  │  - EventCallback: TUI display integration                           │   │
+│  │  ├── PromptLoader: 从 prompts/tools/*.md 加载提示词                 │   │
+│  │  ├── ToolEventAdapter: 桥接事件到 TUI 回调                           │   │
+│  │  └── ToolFilter: 控制工具访问 (ReadOnly/FullAccess 等)              │   │
 │  └─────────────────────────────────────────────────────────────────────┘   │
 │                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### 2.3 BaseTool 2.0 Interface
+---
+
+## 3. BaseTool 2.0 框架
+
+### 3.1 核心特性
+
+1. **动态提示词加载**: 从 `prompts/tools/*.md` 加载工具提示词
+2. **事件回调**: 通知 TUI 工具执行进度
+3. **配置支持**: 通过 `config/tools.yaml` 配置工具行为
+4. **向后兼容**: 保留 v1.0 Tool 接口
+
+### 3.2 BaseTool 接口
 
 ```python
 from abc import ABC, abstractmethod
-from typing import Any, Callable, Dict, List, Optional
-from pathlib import Path
-
+from typing import Any, Callable, Dict, Optional
 
 class BaseTool(ABC):
-    """Base class for all tools with dynamic prompt support"""
+    """所有工具的基类，支持动态提示词 (v2.0)"""
 
     def __init__(
         self,
         name: str,
         description: str,
         prompt_path: Optional[str] = None,
-        event_callback: Optional[Callable] = None,
+        event_callback: Optional[Callable[[str, str, Dict[str, Any]], None]] = None,
         config: Optional[Dict[str, Any]] = None,
     ):
-        """Initialize BaseTool
+        """初始化 BaseTool
 
         Args:
-            name: Tool name
-            description: Tool description
-            prompt_path: Path to prompt template (relative to prompts/tools/)
-            event_callback: Callback for tool events (for TUI display)
-            config: Tool configuration from tools.yaml
+            name: 工具名称
+            description: 工具描述
+            prompt_path: 提示词模板路径（相对于 prompts/）
+            event_callback: 工具事件回调（用于 TUI 显示）
+                           签名: callback(tool_name, event_type, data)
+            config: 工具配置字典
         """
-        self.name = name
-        self.description = description
-        self.config = config or {}
-        self._event_callback = event_callback
-
-        # Initialize prompt loader
-        self._prompt_loader = PromptLoader()
-        self._prompt_path = prompt_path
+        ...
 
     @abstractmethod
     def run(self, parameters: Dict[str, Any]) -> "ToolResponse":
-        """Execute the tool
-
-        Args:
-            parameters: Tool parameters
-
-        Returns:
-            ToolResponse: Tool execution result
-        """
+        """执行工具"""
         pass
 
     @abstractmethod
-    def get_parameters(self) -> List["ToolParameter"]:
-        """Get tool parameter definitions
-
-        Returns:
-            List of parameter definitions
-        """
+    def get_parameters(self) -> list["ToolParameter"]:
+        """获取工具参数定义"""
         pass
 
     def get_system_prompt(self, context: Dict[str, Any] = None) -> str:
-        """Get tool-specific system prompt
-
-        Args:
-            context: Context for prompt interpolation
-
-        Returns:
-            System prompt string
-        """
-        if self._prompt_path:
-            return self._prompt_loader.load(self._prompt_path, context)
-        return self._get_default_prompt()
-
-    def _get_default_prompt(self) -> str:
-        """Get default system prompt (override in subclass)"""
-        return f"You are the {self.name} tool. {self.description}"
+        """获取工具特定的系统提示词（带上下文插值）"""
+        ...
 
     def notify_event(self, event_type: str, data: Dict[str, Any] = None) -> None:
-        """Notify tool event to callback (for TUI display)
+        """通知工具事件到回调（用于 TUI 显示）"""
+        ...
 
-        Args:
-            event_type: Event type (e.g., "start", "progress", "complete", "error")
-            data: Event data
-        """
-        if self._event_callback:
-            self._event_callback(
-                tool_name=self.name,
-                event_type=event_type,
-                data=data or {},
-            )
+    def get_config(self, key: str, default: Any = None) -> Any:
+        """获取配置值"""
+        ...
+
+    def to_dict(self) -> Dict[str, Any]:
+        """将工具信息转换为字典"""
+        ...
 ```
 
 ---
 
-## 3. CommandTool Migration to 2.0
+## 4. CommandTool v2.0 架构
 
-### 3.1 Current Architecture (1.0)
-
-```
-CommandTool (v1.0)
-├─ SecurityLayer (SecurityLevel)
-│  ├─ BANNED_COMMANDS
-│  ├─ SAFE_READ_ONLY
-│  └─ REQUIRES_CONFIRMATION
-├─ PermissionService
-└─ SafeExecutor
-```
-
-### 3.2 Migrated Architecture (2.0)
+### 4.1 安全层
 
 ```
-CommandTool (v2.0) extends BaseTool
-├─ BaseTool
-│  ├─ name: str = "Command"
-│  ├─ description: str
-│  ├─ prompt_loader: PromptLoader
-│  └─ event_callback: Callable
-├─ SecurityLayer (unchanged)
-├─ PermissionService (unchanged)
-└─ SafeExecutor (unchanged)
+┌─────────────────────────────────────────────────────────────────┐
+│                     CommandTool 安全流程                          │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  输入: 命令字符串                                                │
+│         ↓                                                       │
+│  ┌──────────────────────────────────────────────────────────┐  │
+│  │ 第一层: 黑名单检查                                         │  │
+│  │ - rm -rf, curl, wget, sudo, chmod, dd 等                  │  │
+│  │ → 匹配则拒绝                                               │  │
+│  └──────────────────────────────────────────────────────────┘  │
+│         ↓                                                       │
+│  ┌──────────────────────────────────────────────────────────┐  │
+│  │ 第二层: 白名单检查 (安全命令)                               │  │
+│  │ - ls, pwd, cat, git status, git log 等                    │  │
+│  │ → 直接执行（无需确认）                                      │  │
+│  └──────────────────────────────────────────────────────────┘  │
+│         ↓                                                       │
+│  ┌──────────────────────────────────────────────────────────┐  │
+│  │ 第三层: 安全模式检查                                        │  │
+│  │                                                           │  │
+│  │ ┌─────────────┐  ┌─────────────┐  ┌─────────────┐        │  │
+│  │ │   STRICT    │  │   NORMAL    │  │   TRUST     │        │  │
+│  │ │ 仅白名单    │  │ 用户确认    │  │ 直接执行    │        │  │
+│  │ └─────────────┘  └─────────────┘  └─────────────┘        │  │
+│  └──────────────────────────────────────────────────────────┘  │
+│         ↓                                                       │
+│  ┌──────────────────────────────────────────────────────────┐  │
+│  │ SafeExecutor                                              │  │
+│  │ - 超时控制 (默认 120s, 最大 600s)                          │  │
+│  │ - 输出截断 (最大 30KB)                                     │  │
+│  │ - 工作目录限制                                             │  │
+│  └──────────────────────────────────────────────────────────┘  │
+│         ↓                                                       │
+│  输出: CommandResult (success, stdout, stderr, exit_code)       │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
-### 3.3 Migration Changes
+### 4.2 事件流
 
-| Aspect | v1.0 | v2.0 |
-|--------|------|------|
-| **Base Class** | `Tool` | `BaseTool` |
-| **Prompt Source** | Hardcoded | `prompts/tools/command.md` |
-| **Event Support** | None | `event_callback` parameter |
-| **Configuration** | Constructor args | `config` dict from tools.yaml |
-| **Security** | Unchanged | Unchanged |
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    CommandTool 事件流                             │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  run() 被调用                                                    │
+│      │                                                          │
+│      ▼                                                          │
+│  ┌─────────────┐                                                │
+│  │    start    │ ──→ {"command": "..."}                        │
+│  └─────────────┘                                                │
+│      │                                                          │
+│      ▼                                                          │
+│  ┌──────────────────┐                                           │
+│  │  security_check  │ ──→ {"command": "...", "category": "..."}│
+│  └──────────────────┘                                           │
+│      │                                                          │
+│      ▼ (如果非安全命令)                                          │
+│  ┌──────────────────────┐                                       │
+│  │ permission_request   │ ──→ {"command": "...", "reason": ".."}│
+│  └──────────────────────┘                                       │
+│      │                                                          │
+│      ▼                                                          │
+│  ┌───────────────┐       ┌───────────────┐                     │
+│  │   complete    │  或   │     error     │                     │
+│  └───────────────┘       └───────────────┘                     │
+│      │                        │                                  │
+│      ▼                        ▼                                  │
+│  {"exit_code": 0,        {"error_code": "...",                 │
+│   "duration_ms": ...}     "error_message": "..."}              │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
 
 ---
 
-## 4. Prompt System Design
+## 5. ToolEventAdapter - TUI 集成
 
-### 4.1 Directory Structure
+### 5.1 目的
+
+将 BaseTool 2.0 事件桥接到 TUI 回调，实现工具执行的实时显示。
+
+### 5.2 使用方法
+
+```python
+from mini_coder.tools import CommandTool, ToolEventAdapter, ToolEventCollector
+
+# 方式 1: 使用 TUI 回调
+adapter = ToolEventAdapter(tui_callback=console_app.on_tool_called)
+tool = CommandTool(event_callback=adapter.create_callback())
+
+# 方式 2: 使用收集器进行测试
+collector = ToolEventCollector()
+tool = CommandTool(event_callback=collector.create_callback())
+
+# 执行后检查事件
+events = collector.get_events()
+print(f"事件: {[e.event_type for e in events]}")
+```
+
+### 5.3 事件映射
+
+| 工具事件 | TUI 状态 | 显示 |
+|----------|----------|------|
+| `start` | `starting` | `[Tool] Command: echo hello` |
+| `complete` | `completed` | `[Tool] Command (1.23s)` |
+| `error` | `failed` | `[Tool] Command (FAILED)` |
+| `security_check` | (内部) | 不显示 |
+| `permission_request` | `permission_request` | 权限对话框 |
+
+---
+
+## 6. 提示词系统
+
+### 6.1 目录结构
 
 ```
 prompts/
-├── system/                    # Agent system prompts (existing)
+├── system/                    # Agent 系统提示词
 │   ├── main-agent.md
-│   ├── subagent-coder.md
-│   └── ...
-├── tools/                     # Tool-specific prompts (new)
-│   ├── command.md            # CommandTool prompt template
-│   ├── memory.md             # Future Memory Tool (if needed)
-│   └── ...                   # Future tools
-└── templates/                 # Shared templates (existing)
-    ├── coding-standards.md
-    └── project-context.md
+│   └── subagent-*.md
+├── tools/                     # 工具特定提示词
+│   └── command.md            # CommandTool 提示词模板
+└── templates/                 # 共享模板
+    └── coding-standards.md
 ```
 
-### 4.2 Command Tool Prompt Template
+### 6.2 提示词模板示例
 
-Location: `prompts/tools/command.md`
+`prompts/tools/command.md`:
 
 ```markdown
 # Command Tool
@@ -244,64 +307,19 @@ You are the **Command** tool - a safe system command executor.
 
 ## Security Model
 
-You execute commands with the following security checks:
+1. **Blacklist Check**: Dangerous commands are rejected
+2. **Whitelist**: Safe commands execute without confirmation
+3. **Requires Confirmation**: Other commands need approval
 
-1. **Blacklist Check**: Dangerous commands are directly rejected
-   - Examples: `rm -rf`, `curl`, `wget`, `sudo`, `chmod`, `dd`
-
-2. **Whitelist (Safe Commands)**: These execute without confirmation
-   - File viewing: `ls`, `pwd`, `cat`, `head`, `tail`, `wc`
-   - Git read-only: `git status`, `git log`, `git diff`, `git branch`
-   - Development: `python --version`, `pytest --collect-only`
-
-3. **Requires Confirmation**: Other commands need user approval
-   - File operations: `mkdir`, `cp`, `mv`, `rm`
-   - Git write: `git add`, `git commit`, `git push`
-   - Package managers: `pip install`, `npm install`
-
-## Security Modes
-
-- **strict**: Only whitelisted commands allowed
-- **normal**: Blacklist + Whitelist + Confirmation (default)
-- **trust**: Only blacklist check
-
-Current mode: `{{security_mode}}`
-
-## Output Handling
-
-- Command output is truncated if exceeds {{max_output_length}} characters
-- Execution timeout: {{timeout}} seconds (max: {{max_timeout}})
-- Working directory restricted to: {{allowed_paths}}
-
-## Usage
-
-Execute commands by specifying:
-- `command`: The shell command to run
-- `timeout`: Optional timeout override (seconds)
-
-## Event Callbacks
-
-Tool execution triggers events:
-- `start`: Command execution started
-- `security_check`: Security check result
-- `permission_request`: User confirmation requested (if needed)
-- `complete`: Execution completed
-- `error`: Execution failed
+Current security mode: `{{security_mode}}`
+Timeout: {{timeout}} seconds (max: {{max_timeout}})
 ```
 
-### 4.3 PromptLoader Implementation
+### 6.3 PromptLoader
 
 ```python
-from pathlib import Path
-from typing import Dict, Any, Optional
-
-
 class PromptLoader:
-    """Dynamic prompt loader with template interpolation"""
-
-    def __init__(self, base_dir: str = "prompts"):
-        self.base_dir = Path(base_dir)
-        self._cache: Dict[str, str] = {}
+    """动态提示词加载器，支持模板插值"""
 
     def load(
         self,
@@ -309,183 +327,60 @@ class PromptLoader:
         context: Dict[str, Any] = None,
         use_cache: bool = True,
     ) -> str:
-        """Load and interpolate prompt template
-
-        Args:
-            prompt_path: Path relative to base_dir (e.g., "tools/command.md")
-            context: Context dictionary for interpolation
-            use_cache: Whether to use cached prompt
-
-        Returns:
-            Interpolated prompt string
-        """
-        # Check cache
-        if use_cache and prompt_path in self._cache:
-            prompt = self._cache[prompt_path]
-        else:
-            # Load from file
-            full_path = self.base_dir / prompt_path
-            if not full_path.exists():
-                prompt = self._get_fallback_prompt(prompt_path)
-            else:
-                prompt = full_path.read_text(encoding="utf-8")
-
-            if use_cache:
-                self._cache[prompt_path] = prompt
-
-        # Interpolate context
-        if context:
-            for key, value in context.items():
-                prompt = prompt.replace(f"{{{{{key}}}}}", str(value))
-
-        return prompt
-
-    def _get_fallback_prompt(self, prompt_path: str) -> str:
-        """Get fallback prompt when file is missing"""
-        return f"[Prompt file not found: {prompt_path}]"
+        """加载并插值提示词模板"""
+        ...
 ```
 
 ---
 
-## 5. Configuration Design
+## 7. 配置
 
-### 5.1 tools.yaml Structure
+### 7.1 tools.yaml 结构
 
 ```yaml
-# Tools Configuration
-# 工具配置文件
-
-# Command Tool Settings
 command:
-  # Prompt template path (relative to prompts/)
   prompt_path: "tools/command.md"
-
-  # Security mode: strict, normal, trust
   security_mode: normal
-
-  # Timeout settings (seconds)
   timeout:
-    default: 120    # Default 2 minutes
-    max: 600        # Max 10 minutes
-
-  # Output limits
-  max_output_length: 30000  # 30KB
-
-  # Permission cache
-  permission:
-    cache_enabled: true
-    cache_ttl: 3600  # 1 hour
-
-  # Allowed working directories
+    default: 120
+    max: 600
+  max_output_length: 30000
   allowed_paths:
     - ${PROJECT_ROOT}
     - /tmp
-
-  # Custom blacklist (appended to default)
-  banned_commands:
-    - my_dangerous_command
-
-  # Custom whitelist (appended to default)
-  safe_commands:
-    - my_safe_command
-
-  # Event callback configuration
   events:
     enabled: true
     on_start: true
-    on_progress: false
     on_complete: true
     on_error: true
 
-# Tool Filter Settings
 tool_filter:
-  # Default filter for subagents
   default_for_subagent: readonly
-
-  # Filter configuration by agent type
   agent_filters:
     explore: readonly
-    plan: planner     # ReadOnly + WebSearch
+    plan: readonly
     code: full_access
-    review: readonly
-    bash: bash_restricted
-```
-
-### 5.2 Configuration Loading
-
-```python
-import os
-from pathlib import Path
-import yaml
-
-
-class ToolConfigLoader:
-    """Load tool configuration from tools.yaml"""
-
-    def __init__(self, config_path: str = "config/tools.yaml"):
-        self.config_path = Path(config_path)
-        self._config: Dict[str, Any] = {}
-        self._load()
-
-    def _load(self) -> None:
-        """Load configuration from YAML file"""
-        if self.config_path.exists():
-            content = self.config_path.read_text(encoding="utf-8")
-            self._config = yaml.safe_load(content) or {}
-            self._interpolate_env_vars()
-
-    def _interpolate_env_vars(self) -> None:
-        """Interpolate environment variables in config values"""
-        self._config = self._interpolate_recursive(self._config)
-
-    def _interpolate_recursive(self, obj: Any) -> Any:
-        """Recursively interpolate ${VAR} patterns"""
-        if isinstance(obj, str):
-            if obj.startswith("${") and obj.endswith("}"):
-                var_name = obj[2:-1]
-                return os.environ.get(var_name, obj)
-            return obj
-        elif isinstance(obj, dict):
-            return {k: self._interpolate_recursive(v) for k, v in obj.items()}
-        elif isinstance(obj, list):
-            return [self._interpolate_recursive(v) for v in obj]
-        return obj
-
-    def get_tool_config(self, tool_name: str) -> Dict[str, Any]:
-        """Get configuration for a specific tool"""
-        return self._config.get(tool_name, {})
-
-    def get_filter_config(self, agent_type: str) -> str:
-        """Get filter type for an agent"""
-        filters = self._config.get("tool_filter", {})
-        agent_filters = filters.get("agent_filters", {})
-        return agent_filters.get(
-            agent_type,
-            filters.get("default_for_subagent", "readonly"),
-        )
 ```
 
 ---
 
-## 6. ToolFilter Architecture
+## 8. ToolFilter 架构
 
-### 6.1 Filter Types
+### 8.1 过滤器类型
 
-| Filter | Purpose | Allowed Tools | Use Case |
-|--------|---------|---------------|----------|
-| **ReadOnlyFilter** | Read-only access | Read, Glob, Grep, LS, Command (safe) | Explorer, Reviewer |
-| **PlannerFilter** | ReadOnly + Web | ReadOnly + WebSearch, WebFetch | Planner |
-| **FullAccessFilter** | Full access (minus dangerous) | All except dangerous commands | Coder |
-| **BashRestrictedFilter** | Bash command filtering | Whitelist-based | Bash Agent |
-| **WorkDirFilter** | Working directory access | Path-based filtering | All file tools |
-| **CustomFilter** | User-defined | Configurable | Custom agents |
+| 过滤器 | 用途 | 使用场景 |
+|--------|------|----------|
+| **ReadOnlyFilter** | 只读访问 | Explorer, Reviewer |
+| **FullAccessFilter** | 完全访问（排除危险命令） | Coder |
+| **BashRestrictedFilter** | Bash 命令过滤 | Bash Agent |
+| **WorkDirFilter** | 工作目录过滤 | 所有文件工具 |
+| **CustomFilter** | 用户自定义 | 自定义 agent |
 
-### 6.2 Filter Hierarchy
+### 8.2 过滤器层次
 
 ```
-ToolFilter (Abstract Base)
+ToolFilter (抽象基类)
 ├── ReadOnlyFilter
-│   └── PlannerFilter (extends with WebSearch/WebFetch)
 ├── FullAccessFilter
 ├── BashRestrictedFilter
 ├── WorkDirFilter
@@ -494,164 +389,122 @@ ToolFilter (Abstract Base)
 
 ---
 
-## 7. Event Callback System
+## 9. 工具执行流程
 
-### 7.1 Event Types
+### 9.1 完整流程图
 
-| Event Type | Trigger | Data |
-|------------|---------|------|
-| `tool_start` | Tool execution starts | `{tool_name, parameters}` |
-| `tool_progress` | Progress update (optional) | `{tool_name, progress_percent, message}` |
-| `security_check` | Security check performed | `{tool_name, command, category}` |
-| `permission_request` | User confirmation requested | `{tool_name, command, reason}` |
-| `tool_complete` | Tool execution completed | `{tool_name, result_summary, duration_ms}` |
-| `tool_error` | Tool execution failed | `{tool_name, error_code, error_message}` |
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                          工具执行流程                                         │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  1. 用户/Agent 请求                                                          │
+│     │                                                                       │
+│     ▼                                                                       │
+│  2. ToolFilter.check_access(tool_name, parameters)                         │
+│     │                                                                       │
+│     ├─ DENIED → 返回 ToolResponse.error("访问被拒绝")                       │
+│     │                                                                       │
+│     ▼                                                                       │
+│  3. BaseTool.run(parameters)                                               │
+│     │                                                                       │
+│     ├─ notify_event("start", {...})                                        │
+│     │                                                                       │
+│     ▼                                                                       │
+│  4. 工具特定逻辑（如 CommandTool 安全检查）                                   │
+│     │                                                                       │
+│     ├─ notify_event("security_check", {...})                               │
+│     │                                                                       │
+│     ▼                                                                       │
+│  5. 执行工具动作                                                              │
+│     │                                                                       │
+│     ├─ 成功 → notify_event("complete", {...})                              │
+│     │         返回 ToolResponse.success(...)                                │
+│     │                                                                       │
+│     └─ 失败 → notify_event("error", {...})                                 │
+│               返回 ToolResponse.error(...)                                  │
+│                                                                             │
+│  6. ToolEventAdapter 将事件转换为 TUI 格式                                   │
+│     │                                                                       │
+│     ▼                                                                       │
+│  7. TUI 显示工具状态                                                         │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
 
-### 7.2 Callback Integration with TUI
+### 9.2 代码示例
 
 ```python
-class TuiToolEventHandler:
-    """Handle tool events for TUI display"""
+from mini_coder.tools import (
+    CommandTool,
+    ToolEventAdapter,
+    SecurityMode,
+)
 
-    def __init__(self, tui_app):
-        self.tui_app = tui_app
+# 1. 创建事件适配器用于 TUI
+def on_tool_event(tool_name, args, status, duration, result):
+    print(f"[{tool_name}] {status}: {args} ({duration:.2f}s)")
 
-    def handle_event(
-        self,
-        tool_name: str,
-        event_type: str,
-        data: Dict[str, Any],
-    ) -> None:
-        """Handle tool event and update TUI"""
-        if event_type == "tool_start":
-            self.tui_app.show_tool_status(tool_name, "Running...")
-        elif event_type == "tool_complete":
-            self.tui_app.show_tool_status(tool_name, "Completed")
-        elif event_type == "tool_error":
-            self.tui_app.show_tool_status(tool_name, f"Error: {data.get('error_message')}")
-        elif event_type == "permission_request":
-            self.tui_app.show_permission_dialog(
-                tool_name=tool_name,
-                command=data.get("command"),
-                reason=data.get("reason"),
-            )
+adapter = ToolEventAdapter(tui_callback=on_tool_event)
+
+# 2. 创建带事件回调的工具
+tool = CommandTool(
+    security_mode=SecurityMode.NORMAL,
+    event_callback=adapter.create_callback(),
+    config={
+        "timeout": 120,
+        "max_output_length": 30000,
+    }
+)
+
+# 3. 执行命令
+result = tool.run({"command": "git status"})
+
+# 4. 检查结果
+if result.error_code is None:
+    print(f"成功: {result.text}")
+else:
+    print(f"错误: {result.error_code} - {result.text}")
 ```
 
 ---
 
-## 8. Implementation Roadmap
+## 10. 实现清单
 
-### Phase 1: Documentation & Planning
-- [x] Write architecture design document (`docs/tools-architecture-design.md`)
-- [ ] Create OpenSpec change request (`change: optimize-tools-framework`)
-- [ ] Generate proposal.md, design.md, specs.md, tasks.md
+### 已完成
 
-### Phase 2: BaseTool 2.0 Framework
-- [ ] Create `src/mini_coder/tools/base_v2.py` with BaseTool 2.0
-- [ ] Implement PromptLoader class
-- [ ] Implement ToolConfigLoader class
-- [ ] Create prompts directory structure (`prompts/tools/`)
+- [x] **Phase 1: 文档与规划**
+  - [x] 架构设计文档
+  - [x] 设计决策文档
 
-### Phase 3: CommandTool Migration
-- [ ] Migrate CommandTool to extend BaseTool 2.0
-- [ ] Create `prompts/tools/command.md` prompt template
-- [ ] Add event_callback support to CommandTool
-- [ ] Update tools.yaml with CommandTool configuration
+- [x] **Phase 2: BaseTool 2.0 框架**
+  - [x] `src/mini_coder/tools/base.py` - BaseTool 2.0
+  - [x] `src/mini_coder/tools/prompt_loader.py` - PromptLoader
+  - [x] `prompts/tools/command.md` - Command 提示词模板
 
-### Phase 4: Integration & Testing
-- [ ] Integrate event callbacks with TUI
-- [ ] Write unit tests for BaseTool 2.0
-- [ ] Write integration tests for migrated CommandTool
-- [ ] Update documentation
+- [x] **Phase 3: CommandTool 迁移**
+  - [x] 迁移 CommandTool 到 BaseTool 2.0
+  - [x] 添加 event_callback 支持
+  - [x] 更新 tools.yaml 配置
 
-### Phase 5: Future Enhancements (Optional)
-- [ ] Create additional tool prompt templates
-- [ ] Implement more sophisticated prompt interpolation
-- [ ] Add support for tool chaining
-- [ ] Implement tool response caching
+- [x] **Phase 4: 集成与测试**
+  - [x] `src/mini_coder/tools/event_adapter.py` - ToolEventAdapter
+  - [x] BaseTool 2.0 单元测试
+  - [x] ToolEventAdapter 单元测试
+  - [x] 集成测试
 
----
+### 未来增强
 
-## 9. Trade-offs and Decisions
-
-### 9.1 Why Dynamic Prompts for Tools?
-
-| Benefit | Explanation |
-|---------|-------------|
-| **Consistency** | Same pattern as Agent prompts (`prompts/system/*.md`) |
-| **Maintainability** | Prompts are editable without code changes |
-| **Localization** | Easy to add multi-language support |
-| **Customization** | Users can override prompts via configuration |
-
-### 9.2 Why Not Implement Memory as Tool?
-
-| Concern | Explanation |
-|---------|-------------|
-| **Access Pattern** | Memory is auto-triggered, not LLM-initiated |
-| **Complexity** | Would require Main Agent → Memory Tool internal calls |
-| **Performance** | Direct method calls more efficient than tool invocation |
-| **Semantic Clarity** | Memory is infrastructure, not a capability |
-
-### 9.3 Why Keep Existing Tool Interface?
-
-| Reason | Explanation |
-|--------|-------------|
-| **Backward Compatibility** | Existing code uses current interface |
-| **Simplicity** | run() and get_parameters() are sufficient |
-| **Extensibility** | BaseTool 2.0 adds features via inheritance |
+- [ ] 更多工具提示词模板
+- [ ] 工具响应缓存
+- [ ] 工具链支持
+- [ ] 更复杂的提示词插值
 
 ---
 
-## 10. Reference Architecture
+## 11. 相关文档
 
-### 10.1 Inspired By
-
-| Project | Concept | Adaptation |
-|---------|---------|------------|
-| **HelloAgents** | ToolFilter mechanism | Extended with WorkDirFilter |
-| **OpenCode** | Multi-layer security | Adopted blacklist/whitelist/confirm |
-| **Aider** | Direct command execution | Improved with timeout/output limits |
-
-### 10.2 Related Documentation
-
-- `docs/multi-agent-architecture-design.md` - Agent architecture
-- `docs/command-execution-security-design.md` - Command security
-- `docs/context-memory-design.md` - Memory system design
-- `CLAUDE.md` - Project overview and workflow
-
----
-
-## Appendix A: Complete BaseTool 2.0 Code Example
-
-See the full implementation in the design document content above.
-
-## Appendix B: Migration Checklist
-
-### CommandTool v1.0 → v2.0 Migration
-
-- [ ] **Code Changes**
-  - [ ] Change base class from `Tool` to `BaseTool`
-  - [ ] Add `prompt_path` parameter to `__init__`
-  - [ ] Add `event_callback` parameter to `__init__`
-  - [ ] Call `notify_event()` at key execution points
-
-- [ ] **Prompt Template**
-  - [ ] Create `prompts/tools/command.md`
-  - [ ] Include security mode documentation
-  - [ ] Include usage examples
-  - [ ] Use `{{placeholders}}` for dynamic values
-
-- [ ] **Configuration**
-  - [ ] Update `tools.yaml` with new settings
-  - [ ] Add prompt_path configuration
-  - [ ] Add event callback configuration
-
-- [ ] **Testing**
-  - [ ] Update existing unit tests
-  - [ ] Add tests for prompt loading
-  - [ ] Add tests for event callbacks
-
-- [ ] **Documentation**
-  - [ ] Update tool documentation
-  - [ ] Add migration guide
-  - [ ] Update API reference
+- `docs/multi-agent-architecture-design.md` - Agent 架构
+- `docs/command-execution-security-design.md` - 命令安全
+- `CLAUDE.md` - 项目概述和工作流
+- `prompts/tools/command.md` - Command 工具提示词模板

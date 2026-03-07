@@ -424,4 +424,4 @@ Contributions are welcome! Please read the development guidelines above.
 ### Debug Mode
 - Use `/debug` command to toggle verbose output
 - Use `/context` to view token usage and message count
-- Check logs at `~/.mini-coder/logs/tui.log` or `logs/tui.log`
+- Check logs at `~/.mini-coder/logs/` or `logs/` (文件名格式: `tui_YYYYMMDD_HHMMSS.log`，带创建时间戳)
