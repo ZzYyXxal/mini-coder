@@ -4,17 +4,31 @@ This module provides integration between LangGraph's with_structured_output
 and our structured output schemas.
 
 Usage:
-    from mini_coder.graph.output_parser import create_structured_coder_agent
+    from mini_coder.graph.output_parser import create_coder_agent
 
-    agent = create_structured_coder_agent(llm)
-    result = await agent.ainvoke({"messages": [...]})
-    # result is now a CoderOutput object
+    agent = create_coder_agent(llm)
+    result = await agent.ainvoke([HumanMessage(content="Create a hello world function")])
+    # result is now a CoderOutputModel
+
+Or use the convenience functions:
+    from mini_coder.graph.output_parser import ainvoke_coder
+
+    output = await ainvoke_coder(llm, "Create a hello world function")
+    # output is now a CoderOutput dataclass
+
+Note:
+    This module (graph/) provides structured JSON output for LangGraph integration.
+    The agents/ module provides text-based output parsing for TUI/CLI.
+    Both serve different purposes and should not be mixed.
 """
 
 from typing import Any, Dict, List, Literal, Optional, Type, Union
+import logging
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel
+
+logger = logging.getLogger(__name__)
 
 from .structured_output import (
     CodeChunk,
@@ -81,10 +95,13 @@ class PlannerOutputModel(BaseModel):
 
 
 class ReviewIssueModel(BaseModel):
-    """Pydantic model for ReviewIssue."""
+    """Pydantic model for ReviewIssue.
+
+    Category must be one of: architecture, quality, style, security.
+    """
     file: str
     line: Optional[int] = None
-    category: str
+    category: Literal["architecture", "quality", "style", "security"]
     message: str
     suggestion: str
 
@@ -120,12 +137,19 @@ class TestResultModel(BaseModel):
 
 
 class BashOutputModel(BaseModel):
-    """Pydantic model for BashOutput."""
+    """Pydantic model for BashOutput.
+
+    bash_mode_used indicates what mode was executed:
+        - quality_report: Full quality pipeline (pytest, mypy, flake8)
+        - single_command: Single safe command execution
+        - confirm_save: Directory listing to confirm file save
+    """
     tests: Optional[TestResultModel] = None
     type_check_passed: Optional[bool] = None
     lint_passed: Optional[bool] = None
     commands_run: List[str] = []
     errors: List[str] = []
+    bash_mode_used: Optional[Literal["quality_report", "single_command", "confirm_save"]] = None
 
 
 class RouterOutputModel(BaseModel):
@@ -140,7 +164,12 @@ class RouterOutputModel(BaseModel):
 # ==================== Conversion Functions ====================
 
 def model_to_coder_output(model: CoderOutputModel) -> CoderOutput:
-    """Convert Pydantic model to dataclass."""
+    """Convert Pydantic model to dataclass.
+
+    Note:
+        CodeChunk.path should be relative to project root.
+        Absolute paths are not recommended.
+    """
     chunks = [
         CodeChunk(
             path=c.path,
@@ -158,8 +187,41 @@ def model_to_coder_output(model: CoderOutputModel) -> CoderOutput:
     )
 
 
+# Fallback mappings for enum conversions
+_PRIORITY_FALLBACK = {
+    "high": TaskPriority.HIGH,
+    "medium": TaskPriority.MEDIUM,
+    "low": TaskPriority.LOW,
+    "urgent": TaskPriority.HIGH,
+    "critical": TaskPriority.HIGH,
+    "normal": TaskPriority.MEDIUM,
+}
+
+_REVIEW_DECISION_FALLBACK = {
+    "pass": ReviewDecision.PASS,
+    "reject": ReviewDecision.REJECT,
+    "approved": ReviewDecision.PASS,
+    "failed": ReviewDecision.REJECT,
+    "accepted": ReviewDecision.PASS,
+}
+
+_ROUTER_DESTINATION_FALLBACK = {
+    "explorer": RouterDestination.EXPLORER,
+    "planner": RouterDestination.PLANNER,
+    "coder": RouterDestination.CODER,
+    "reviewer": RouterDestination.REVIEWER,
+    "bash": RouterDestination.BASH,
+    "general_purpose": RouterDestination.GENERAL_PURPOSE,
+    "general": RouterDestination.GENERAL_PURPOSE,
+}
+
+
 def model_to_planner_output(model: PlannerOutputModel) -> PlannerOutput:
-    """Convert Pydantic model to dataclass."""
+    """Convert Pydantic model to dataclass.
+
+    Handles priority conversion with fallback for unexpected values.
+    Phase names are determined by LLM and should be processed in order.
+    """
     phases = {}
     for phase_name, tasks in model.phases.items():
         phases[phase_name] = [
@@ -168,7 +230,7 @@ def model_to_planner_output(model: PlannerOutputModel) -> PlannerOutput:
                 title=t.title,
                 description=t.description,
                 is_test=t.is_test,
-                priority=TaskPriority(t.priority),
+                priority=_safe_parse_priority(t.priority),
                 dependencies=t.dependencies,
                 estimated_complexity=t.estimated_complexity,
             )
@@ -183,20 +245,71 @@ def model_to_planner_output(model: PlannerOutputModel) -> PlannerOutput:
     )
 
 
+def _safe_parse_priority(value: str) -> TaskPriority:
+    """Safely parse priority with fallback.
+
+    Args:
+        value: Priority string from LLM
+
+    Returns:
+        TaskPriority enum, defaults to MEDIUM for unknown values.
+    """
+    normalized = value.lower().strip()
+    if normalized in _PRIORITY_FALLBACK:
+        return _PRIORITY_FALLBACK[normalized]
+    logger.warning(f"Unknown priority value: {value}, defaulting to MEDIUM")
+    return TaskPriority.MEDIUM
+
+
+def _safe_parse_review_decision(value: str) -> ReviewDecision:
+    """Safely parse review decision with fallback.
+
+    Args:
+        value: Decision string from LLM
+
+    Returns:
+        ReviewDecision enum, defaults to REJECT for unknown values (safe default).
+    """
+    normalized = value.lower().strip()
+    if normalized in _REVIEW_DECISION_FALLBACK:
+        return _REVIEW_DECISION_FALLBACK[normalized]
+    logger.warning(f"Unknown review decision: {value}, defaulting to REJECT")
+    return ReviewDecision.REJECT
+
+
+def _safe_parse_router_destination(value: str) -> RouterDestination:
+    """Safely parse router destination with fallback.
+
+    Args:
+        value: Destination string from LLM
+
+    Returns:
+        RouterDestination enum, defaults to GENERAL_PURPOSE for unknown values.
+    """
+    normalized = value.lower().strip()
+    if normalized in _ROUTER_DESTINATION_FALLBACK:
+        return _ROUTER_DESTINATION_FALLBACK[normalized]
+    logger.warning(f"Unknown router destination: {value}, defaulting to GENERAL_PURPOSE")
+    return RouterDestination.GENERAL_PURPOSE
+
+
 def model_to_reviewer_output(model: ReviewerOutputModel) -> ReviewerOutput:
-    """Convert Pydantic model to dataclass."""
+    """Convert Pydantic model to dataclass.
+
+    Handles decision conversion with fallback for unexpected values.
+    """
     issues = [
         ReviewIssue(
             file=i.file,
             line=i.line,
-            category=i.category,  # type: ignore
+            category=i.category,  # Pydantic validates Literal
             message=i.message,
             suggestion=i.suggestion,
         )
         for i in model.issues
     ]
     return ReviewerOutput(
-        decision=ReviewDecision(model.decision),
+        decision=_safe_parse_review_decision(model.decision),
         issues=issues,
         summary=model.summary,
     )
@@ -236,13 +349,21 @@ def model_to_bash_output(model: BashOutputModel) -> BashOutput:
         lint_passed=model.lint_passed,
         commands_run=model.commands_run,
         errors=model.errors,
+        bash_mode_used=model.bash_mode_used,
     )
 
 
 def model_to_router_output(model: RouterOutputModel) -> RouterOutput:
-    """Convert Pydantic model to dataclass."""
+    """Convert Pydantic model to dataclass.
+
+    Handles destination conversion with fallback for unexpected values.
+    Confidence score interpretation:
+        - >= 0.9: High confidence, clear intent
+        - 0.7 - 0.9: Medium confidence, reasonable guess
+        - < 0.7: Low confidence, may need clarification
+    """
     return RouterOutput(
-        destination=RouterDestination(model.destination),
+        destination=_safe_parse_router_destination(model.destination),
         reasoning=model.reasoning,
         bash_mode=model.bash_mode,
         command=model.command,
@@ -494,6 +615,41 @@ async def ainvoke_router(
     return model_to_router_output(model)
 
 
+async def ainvoke_bash(
+    llm: BaseChatModel,
+    bash_mode: Literal["quality_report", "single_command", "confirm_save"],
+    command: Optional[str] = None,
+    context: Optional[Dict[str, Any]] = None,
+) -> BashOutput:
+    """Invoke Bash agent and return structured output.
+
+    Args:
+        llm: Base chat model
+        bash_mode: Execution mode:
+            - "quality_report": Run full quality pipeline (pytest, mypy, flake8)
+            - "single_command": Execute a single safe command
+            - "confirm_save": List directory to confirm file save
+        command: Command to execute (only for single_command mode)
+        context: Optional context (files to test, etc.)
+
+    Returns:
+        BashOutput dataclass with execution results
+    """
+    agent = create_bash_agent(llm)
+
+    if bash_mode == "single_command" and command:
+        message_content = f"Execute command (bash_mode: single_command): {command}"
+    elif bash_mode == "quality_report":
+        message_content = "Run quality pipeline (bash_mode: quality_report)"
+        if context and context.get("files"):
+            message_content += f"\nFiles to test: {context['files']}"
+    else:  # confirm_save
+        message_content = "Confirm file save (bash_mode: confirm_save)"
+
+    model = await agent.ainvoke([HumanMessage(content=message_content)])
+    return model_to_bash_output(model)
+
+
 # ==================== Exports ====================
 
 __all__ = [
@@ -529,5 +685,6 @@ __all__ = [
     "ainvoke_planner",
     "ainvoke_reviewer",
     "ainvoke_explorer",
+    "ainvoke_bash",
     "ainvoke_router",
 ]

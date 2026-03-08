@@ -196,12 +196,20 @@ class TestResult:
 
 @dataclass
 class BashOutput:
-    """Structured output from Bash agent."""
+    """Structured output from Bash agent.
+
+    bash_mode_used indicates what mode was executed:
+        - quality_report: Full quality pipeline (pytest, mypy, flake8)
+        - single_command: Single safe command execution
+        - confirm_save: Directory listing to confirm file save
+        - None: Mode not specified (backward compatibility)
+    """
     tests: Optional[TestResult] = None
     type_check_passed: Optional[bool] = None
     lint_passed: Optional[bool] = None
     commands_run: List[str] = field(default_factory=list)
     errors: List[str] = field(default_factory=list)
+    bash_mode_used: Optional[str] = None  # "quality_report", "single_command", "confirm_save"
 
     def to_dict(self) -> Dict[str, Any]:
         d = {
@@ -214,6 +222,8 @@ class BashOutput:
             d["type_check_passed"] = self.type_check_passed
         if self.lint_passed is not None:
             d["lint_passed"] = self.lint_passed
+        if self.bash_mode_used is not None:
+            d["bash_mode_used"] = self.bash_mode_used
         return d
 
     def to_json(self) -> str:

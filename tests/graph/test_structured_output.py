@@ -359,6 +359,49 @@ class TestRouterOutput:
         assert output.confidence < 0.75
 
 
+class TestFallbackParsing:
+    """Tests for enum fallback parsing."""
+
+    def test_priority_fallback_unknown(self):
+        """Should fallback to MEDIUM for unknown priority values."""
+        from mini_coder.graph.output_parser import _safe_parse_priority
+        from mini_coder.graph.structured_output import TaskPriority
+
+        assert _safe_parse_priority("critical") == TaskPriority.HIGH
+        assert _safe_parse_priority("urgent") == TaskPriority.HIGH
+        assert _safe_parse_priority("normal") == TaskPriority.MEDIUM
+        assert _safe_parse_priority("unknown_value") == TaskPriority.MEDIUM
+
+    def test_review_decision_fallback(self):
+        """Should fallback to REJECT for unknown decision values."""
+        from mini_coder.graph.output_parser import _safe_parse_review_decision
+        from mini_coder.graph.structured_output import ReviewDecision
+
+        assert _safe_parse_review_decision("approved") == ReviewDecision.PASS
+        assert _safe_parse_review_decision("failed") == ReviewDecision.REJECT
+        assert _safe_parse_review_decision("unknown") == ReviewDecision.REJECT
+
+    def test_router_destination_fallback(self):
+        """Should fallback to GENERAL_PURPOSE for unknown destinations."""
+        from mini_coder.graph.output_parser import _safe_parse_router_destination
+        from mini_coder.graph.structured_output import RouterDestination
+
+        assert _safe_parse_router_destination("general") == RouterDestination.GENERAL_PURPOSE
+        assert _safe_parse_router_destination("unknown_agent") == RouterDestination.GENERAL_PURPOSE
+
+    def test_bash_output_with_mode(self):
+        """BashOutput should include bash_mode_used."""
+        from mini_coder.graph.structured_output import BashOutput
+
+        output = BashOutput(
+            commands_run=["ls -la"],
+            bash_mode_used="single_command",
+        )
+
+        d = output.to_dict()
+        assert d["bash_mode_used"] == "single_command"
+
+
 class TestJSONParsing:
     """Tests for parsing JSON from LLM output."""
 
