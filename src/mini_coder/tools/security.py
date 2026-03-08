@@ -16,6 +16,22 @@ class SecurityMode(str, Enum):
     NORMAL = "normal"
     TRUST = "trust"
 
+    @classmethod
+    def from_string(cls, value: str) -> "SecurityMode":
+        """Convert string to SecurityMode enum.
+
+        Args:
+            value: String value (case-insensitive)
+
+        Returns:
+            SecurityMode enum value, defaults to NORMAL if invalid
+        """
+        value = value.lower().strip()
+        try:
+            return cls(value)
+        except ValueError:
+            return cls.NORMAL
+
 
 class SecurityLevel:
     """安全检查层级
