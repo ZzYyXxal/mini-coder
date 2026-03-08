@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mini-coder"
-version = "0.1.0"
+version = "0.2.0"
 description = "A custom multi-agent coding assistant with TUI support"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -24,9 +24,22 @@ classifiers = [
 ]
 dependencies = [
     "numpy>=1.24.0",
+    # LangGraph ecosystem
+    "langgraph>=0.2.0",
+    "langchain-core>=0.3.0",
+    "langsmith>=0.1.0",
 ]
 
 [project.optional-dependencies]
+# LangGraph with LLM providers
+langgraph-full = [
+    "langchain-anthropic>=0.3.0",
+    "langchain-openai>=0.2.0",
+]
+# MCP support
+mcp = [
+    "langchain-mcp-adapters>=0.1.0",
+]
 # 语义检索默认使用 fastembed（无 PyTorch，内存占用小）
 semantic = [
     "fastembed>=0.2.0",
