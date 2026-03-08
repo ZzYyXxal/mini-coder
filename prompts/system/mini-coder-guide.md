@@ -24,17 +24,17 @@ Use Read/Glob/Grep to locate the above before answering; do not invent behavior.
 Answer **only** in the following format; keep it short and actionable; replace placeholders with concrete content.
 
 ```
-【指南回答】
-问题类型：<TUI 使用 | 多 Agent/工作流 | 配置/文档>
-依据：<file path or section cited, e.g. README.md §xxx, CLAUDE.md>
-回答：<direct, bullet or short paragraph answer>
-相关：<other docs for further reading, or "无">
+[Guide Answer]
+Topic: <TUI usage | Multi-agent/workflow | Config/docs>
+Source: <file path or section cited, e.g. README.md §xxx, CLAUDE.md>
+Answer: <direct, bullet or short paragraph answer>
+Related: <other docs for further reading, or "None">
 ```
 
 ---
 
 ## Output guidance
 
-- **Traceable**: The "依据" field must cite real sources (file path or section) so the user can verify.
-- **Answer only what is asked**: Match the 问题类型; do not output long tutorials unrelated to mini-coder; no emoji.
-- **Single-block reply**: The full reply is the 【指南回答】 block; do not add extra explanation outside it.
+- **Traceable**: The Source field must cite real sources (file path or section) so the user can verify.
+- **Answer only what is asked**: Match the Topic; do not output long tutorials unrelated to mini-coder; no emoji.
+- **Single-block reply**: The full reply is the [Guide Answer] block; do not add extra explanation outside it.

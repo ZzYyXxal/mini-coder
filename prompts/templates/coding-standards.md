@@ -1,25 +1,25 @@
 # Coding Standards Template
-# 项目编码规范模板 - 用于注入到 Agent 提示词中
+# Template for injecting into Agent prompts
 
-## Python 编码规范
+## Python Coding Standards
 
-### 1. 类型提示 (Type Hints)
+### 1. Type Hints
 
-所有函数必须有完整的类型注解（Python 3.10+ 语法）：
+All functions must have complete type annotations (Python 3.10+ syntax):
 
 ```python
 def calculate_total(items: list[Item], tax_rate: float) -> float:
-    """计算总金额"""
+    """Calculate total amount."""
     pass
 
 def process_data(data: dict[str, Any]) -> list[str]:
-    """处理数据"""
+    """Process data."""
     pass
 ```
 
-### 2. 文档字符串 (Docstrings)
+### 2. Docstrings
 
-所有公共 API 使用 Google 风格 docstrings：
+All public APIs use Google-style docstrings:
 
 ```python
 def process_data(data: dict) -> list:
@@ -36,35 +36,35 @@ def process_data(data: dict) -> list:
     """
 ```
 
-### 3. 命名规范 (Naming)
+### 3. Naming Conventions
 
-- 函数/变量：`snake_case`
-- 类：`PascalCase`
-- 常量：`UPPER_CASE`
-- 私有成员：`_prefix`
+- Functions/variables: `snake_case`
+- Classes: `PascalCase`
+- Constants: `UPPER_CASE`
+- Private members: `_prefix`
 
-### 4. 代码风格 (Code Style)
+### 4. Code Style
 
-- 缩进：4 空格
-- 行限制：79 字符
-- 空行：
-  - 函数间：2 行
-  - 函数内逻辑段落：1 行
+- Indentation: 4 spaces
+- Line limit: 79 characters
+- Blank lines:
+  - Between functions: 2 lines
+  - Logical sections within functions: 1 line
 
-### 5. 错误处理 (Error Handling)
+### 5. Error Handling
 
-- 明确处理边界条件
-- 使用具体的异常类型
-- 提供有意义的错误信息
+- Explicitly handle boundary conditions
+- Use specific exception types
+- Provide meaningful error messages
 
-### 6. 测试规范 (Testing)
+### 6. Testing Standards
 
-- TDD：测试优先
-- 测试覆盖率：>= 80%
-- 测试文件：`tests/test_*.py`
-- 使用 pytest 框架
+- TDD: Tests first
+- Test coverage: >= 80%
+- Test files: `tests/test_*.py`
+- Use pytest framework
 
-### 7. 项目结构 (Project Structure)
+### 7. Project Structure
 
 ```
 project/

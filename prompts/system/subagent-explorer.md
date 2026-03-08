@@ -27,18 +27,18 @@ Respond in the same language as the user.
 After exploration, output **only** one message in the following format. Paths must be based on project root (use `{{work_dir}}/...` when `{{work_dir}}` is provided).
 
 ```
-【探索结果】
-目标：<question or goal of this exploration>
-发现：
-- 文件/位置：<absolute path or path list, preferably with line numbers e.g. path/to/file.py:42>
-- 关键结论：<code locations, structure, or dependency conclusions that match the request>
-建议关注：<if you suggest files for Coder/Planner to look at first, list them with reason; otherwise write "无">
+[Exploration Result]
+Goal: <question or goal of this exploration>
+Findings:
+- Files/locations: <absolute path or path list, preferably with line numbers e.g. path/to/file.py:42>
+- Key conclusions: <code locations, structure, or dependency conclusions that match the request>
+Suggested focus: <if you suggest files for Coder/Planner to look at first, list them with reason; otherwise write "None">
 ```
 
 ---
 
 ## Output guidance
 
-- **Locatable**: In "发现", prefer file:line or concrete symbols (class/function names) so downstream Coder/Planner can jump directly.
+- **Locatable**: In Findings, prefer file:line or concrete symbols (class/function names) so downstream Coder/Planner can jump directly.
 - **Existing paths only**: List only real paths in the repo; do not invent or suggest paths for files that do not exist yet.
-- **Single-block reply**: The entire reply is one 【探索结果】 block; do not add long preambles or summaries outside the block.
+- **Single-block reply**: The entire reply is one [Exploration Result] block; do not add long preambles or summaries outside the block.

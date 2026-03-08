@@ -1,4 +1,4 @@
-"""Tests for output_parser.py"""
+"""Tests for output_parser.py (English structured output markers)."""
 
 import pytest
 from mini_coder.agents.output_parser import (
@@ -21,60 +21,60 @@ class TestMainAgentParser:
 
     def test_parse_simple_answer(self) -> None:
         """Test parsing simple answer"""
-        text = """【简单回答】
-这是一个简单的回答内容。"""
+        text = """[Simple Answer]
+This is the answer content."""
         result = parse_main_agent_output(text)
 
         assert result.output_type == MainAgentOutputType.SIMPLE_ANSWER
-        assert result.content == "这是一个简单的回答内容。"
+        assert result.content == "This is the answer content."
         assert result.problem_type is None
         assert len(result.subtasks) == 0
 
     def test_parse_complex_task(self) -> None:
         """Test parsing complex task"""
-        text = """【复杂任务】
-问题类型：代码实现
-拆解子问题：
-1. 探索现有代码结构 → 交由：EXPLORER
-2. 规划实现方案 → 交由：PLANNER
-3. 实现核心功能 → 交由：CODER"""
+        text = """[Complex Task]
+Problem type: Code implementation
+Sub-questions:
+1. Explore codebase structure → Assign to: EXPLORER
+2. Plan implementation → Assign to: PLANNER
+3. Implement core logic → Assign to: CODER"""
         result = parse_main_agent_output(text)
 
         assert result.output_type == MainAgentOutputType.COMPLEX_TASK
-        assert result.problem_type == "代码实现"
+        assert result.problem_type == "Code implementation"
         assert len(result.subtasks) == 3
-        assert result.subtasks[0].description == "探索现有代码结构"
+        assert result.subtasks[0].description == "Explore codebase structure"
         assert result.subtasks[0].agent == "EXPLORER"
-        assert result.subtasks[1].description == "规划实现方案"
+        assert result.subtasks[1].description == "Plan implementation"
         assert result.subtasks[1].agent == "PLANNER"
-        assert result.subtasks[2].description == "实现核心功能"
+        assert result.subtasks[2].description == "Implement core logic"
         assert result.subtasks[2].agent == "CODER"
 
     def test_parse_complex_task_with_colon_variant(self) -> None:
         """Test parsing complex task with colon variant"""
-        text = """【复杂任务】
-问题类型: Bug修复
-拆解子问题:
-1. 定位问题代码 → 交由: EXPLORER
-2. 修复 Bug → 交由: CODER"""
+        text = """[Complex Task]
+Problem type: Bug fix
+Sub-questions:
+1. Locate the bug → Assign to: EXPLORER
+2. Fix the bug → Assign to: CODER"""
         result = parse_main_agent_output(text)
 
         assert result.output_type == MainAgentOutputType.COMPLEX_TASK
-        assert result.problem_type == "Bug修复"
+        assert result.problem_type == "Bug fix"
         assert len(result.subtasks) == 2
 
     def test_parse_cannot_handle(self) -> None:
         """Test parsing cannot handle"""
-        text = """【无法处理】
-该任务需要外部 API 访问权限，当前环境不支持。"""
+        text = """[Cannot Handle]
+This task requires external API access which is not available in the current environment."""
         result = parse_main_agent_output(text)
 
         assert result.output_type == MainAgentOutputType.CANNOT_HANDLE
-        assert result.content == "该任务需要外部 API 访问权限，当前环境不支持。"
+        assert "external API" in result.content
 
     def test_parse_unknown(self) -> None:
         """Test parsing unknown format"""
-        text = "这是一段普通的文本，不符合任何格式。"
+        text = "This is plain text that does not match any format."
         result = parse_main_agent_output(text)
 
         assert result.output_type == MainAgentOutputType.UNKNOWN
@@ -82,9 +82,9 @@ class TestMainAgentParser:
 
     def test_parse_with_thinking_tags(self) -> None:
         """Test that thinking tags are preserved in content"""
-        text = """【简单回答】
-<thinking>这是推理过程</thinking>
-这是最终答案。"""
+        text = """[Simple Answer]
+<thinking>Reasoning here</thinking>
+This is the final answer."""
         result = parse_main_agent_output(text)
 
         assert result.output_type == MainAgentOutputType.SIMPLE_ANSWER
@@ -97,41 +97,39 @@ class TestReviewerParser:
     def test_parse_pass(self) -> None:
         """Test parsing pass result"""
         text = """[Pass]
-代码符合架构与质量要求，可进入 Bash 测试阶段。
-（可选）简要说明：实现清晰，测试覆盖完整。"""
+Code meets architecture and quality requirements, ready for Bash testing.
+(Optional) Note: Implementation is clear, tests are complete."""
         result = parse_reviewer_output(text)
 
         assert result.result_type == ReviewerResultType.PASS
-        assert "可进入 Bash 测试阶段" in result.message
+        assert "Bash testing" in result.message
         assert len(result.issues) == 0
 
     def test_parse_reject(self) -> None:
         """Test parsing reject result"""
         text = """[Reject]
-1. [架构] /src/module.py:42 - 未遵循模块边界；建议：将逻辑移至独立模块
-2. [质量] /src/utils.py:100 - 缺少类型注解；建议：添加参数和返回值类型注解
-3. [风格] /src/main.py:15 - 行过长；建议：拆分为多行"""
+1. [architecture] /src/module.py:42 - Module boundary violated; Suggestion: Move logic to a separate module
+2. [quality] /src/utils.py:100 - Missing type hints; Suggestion: Add parameter and return type hints
+3. [style] /src/main.py:15 - Line too long; Suggestion: Split into multiple lines"""
         result = parse_reviewer_output(text)
 
         assert result.result_type == ReviewerResultType.REJECT
         assert len(result.issues) == 3
 
-        # 检查第一个问题
-        assert result.issues[0].category == "架构"
+        assert result.issues[0].category == "architecture"
         assert result.issues[0].file_path == "/src/module.py"
         assert result.issues[0].line_number == 42
-        assert "未遵循模块边界" in result.issues[0].description
-        assert "将逻辑移至独立模块" in result.issues[0].suggestion
+        assert "Module boundary" in result.issues[0].description
+        assert "separate module" in result.issues[0].suggestion
 
-        # 检查第二个问题
-        assert result.issues[1].category == "质量"
+        assert result.issues[1].category == "quality"
         assert result.issues[1].file_path == "/src/utils.py"
         assert result.issues[1].line_number == 100
 
     def test_parse_reject_with_dash_line(self) -> None:
         """Test parsing reject with dash line number"""
         text = """[Reject]
-1. [风格] /src/config.py:- - 配置项未分类；建议：按功能分组"""
+1. [style] /src/config.py:- - Config items not grouped; Suggestion: Group by function"""
         result = parse_reviewer_output(text)
 
         assert result.result_type == ReviewerResultType.REJECT
@@ -140,7 +138,7 @@ class TestReviewerParser:
 
     def test_parse_unknown(self) -> None:
         """Test parsing unknown format"""
-        text = "这段代码看起来还行。"
+        text = "The code looks fine."
         result = parse_reviewer_output(text)
 
         assert result.result_type == ReviewerResultType.UNKNOWN
@@ -152,55 +150,76 @@ class TestQualityReportParser:
 
     def test_parse_full_report(self) -> None:
         """Test parsing full quality report"""
-        text = """【质量报告】
-## 测试结果
-全部通过
+        text = """# Quality Report
+## Tests
+All passed
 
-## 类型检查
-无错误
+## Type Check
+No errors
 
-## 代码风格
-无问题
+## Code Style
+No issues
 
-## 覆盖率
-满足要求(>=80%)
+## Coverage
+Met (>=80%)
 
-## 其他
-无"""
+## Other
+None"""
         result = parse_quality_report(text)
 
-        assert result.test_result == "全部通过"
-        assert result.type_check == "无错误"
-        assert result.code_style == "无问题"
-        assert result.coverage == "满足要求(>=80%)"
-        assert result.other == "无"
+        assert result.test_result == "All passed"
+        assert result.type_check == "No errors"
+        assert result.code_style == "No issues"
+        assert result.coverage == "Met (>=80%)"
+        assert result.other == "None"
+
+    def test_parse_report_with_bracket_marker(self) -> None:
+        """Test parsing report with [Quality Report] marker"""
+        text = """[Quality Report]
+## Tests
+All passed
+
+## Type Check
+No errors
+
+## Code Style
+No issues
+
+## Coverage
+Met (>=80%)
+
+## Other
+None"""
+        result = parse_quality_report(text)
+        assert result.test_result == "All passed"
+        assert result.type_check == "No errors"
 
     def test_parse_partial_report(self) -> None:
         """Test parsing partial report"""
-        text = """【质量报告】
-## 测试结果
-失败：test_auth.py::test_login
+        text = """# Quality Report
+## Tests
+Failed: test_auth.py::test_login
 
-## 类型检查
-有错误：5 处类型不匹配
+## Type Check
+Errors: 5 type mismatches
 
-## 其他
-超时 30 秒"""
+## Other
+Timeout 30s"""
         result = parse_quality_report(text)
 
-        assert result.test_result == "失败：test_auth.py::test_login"
-        assert result.type_check == "有错误：5 处类型不匹配"
-        assert result.code_style == "未执行"
-        assert result.coverage == "未执行"
-        assert result.other == "超时 30 秒"
+        assert result.test_result == "Failed: test_auth.py::test_login"
+        assert result.type_check == "Errors: 5 type mismatches"
+        assert result.code_style == "Not run"
+        assert result.coverage == "Not run"
+        assert result.other == "Timeout 30s"
 
     def test_parse_unknown(self) -> None:
         """Test parsing unknown format"""
-        text = "测试通过了。"
+        text = "Tests passed."
         result = parse_quality_report(text)
 
-        assert result.test_result == "未执行"  # Default values
-        assert result.type_check == "未执行"
+        assert result.test_result == "Not run"
+        assert result.type_check == "Not run"
         assert result.raw_text == text
 
 
@@ -209,49 +228,45 @@ class TestIntegration:
 
     def test_main_agent_workflow(self) -> None:
         """Test main agent workflow simulation"""
-        # 用户提问 -> 简单回答
-        simple = parse_main_agent_output("【简单回答】\n你好！有什么可以帮助你的？")
+        simple = parse_main_agent_output("[Simple Answer]\nHello! How can I help?")
         assert simple.output_type == MainAgentOutputType.SIMPLE_ANSWER
 
-        # 复杂任务拆解
-        complex_task = parse_main_agent_output("""【复杂任务】
-问题类型：功能开发
-拆解子问题：
-1. 探索现有认证模块 → 交由：EXPLORER
-2. 设计 OAuth 集成方案 → 交由：PLANNER
-3. 实现 OAuth 认证 → 交由：CODER
-4. 代码评审 → 交由：REVIEWER
-5. 运行测试 → 交由：BASH""")
+        complex_task = parse_main_agent_output("""[Complex Task]
+Problem type: Feature development
+Sub-questions:
+1. Explore auth module → Assign to: EXPLORER
+2. Design OAuth integration → Assign to: PLANNER
+3. Implement OAuth → Assign to: CODER
+4. Review code → Assign to: REVIEWER
+5. Run tests → Assign to: BASH""")
         assert complex_task.output_type == MainAgentOutputType.COMPLEX_TASK
         assert len(complex_task.subtasks) == 5
 
     def test_reviewer_workflow(self) -> None:
         """Test reviewer workflow simulation"""
-        # 评审通过
-        pass_result = parse_reviewer_output("[Pass]\n代码符合要求。")
+        pass_result = parse_reviewer_output("[Pass]\nCode meets requirements.")
         assert pass_result.result_type == ReviewerResultType.PASS
 
-        # 评审拒绝
         reject_result = parse_reviewer_output("""[Reject]
-1. [质量] /src/auth.py:50 - 密码未加密存储；建议：使用 bcrypt 加密""")
+1. [quality] /src/auth.py:50 - Password not encrypted; Suggestion: Use bcrypt""")
         assert reject_result.result_type == ReviewerResultType.REJECT
         assert len(reject_result.issues) == 1
 
     def test_bash_workflow(self) -> None:
         """Test bash agent workflow simulation"""
-        report = parse_quality_report("""【质量报告】
-## 测试结果
-全部通过
+        report = parse_quality_report("""# Quality Report
+## Tests
+All passed
 
-## 类型检查
-无错误
+## Type Check
+No errors
 
-## 代码风格
-无问题
+## Code Style
+No issues
 
-## 覆盖率
-满足要求(>=80%)""")
-        assert report.test_result == "全部通过"
+## Coverage
+Met (>=80%)""")
+        assert report.test_result == "All passed"
 
 
 if __name__ == "__main__":

@@ -556,9 +556,8 @@ Output Format (STRICT BINARY CHOICE):
 
 ### Reject
 [Reject] Code needs modification:
-1. [Architecture] Specific file:line - issue + fix suggestion
-2. [Quality] Specific file:line - issue + fix suggestion
-3. [Style] Specific file:line - issue + fix suggestion"""
+1. [architecture|quality|style] <file>:<line> - <issue>; Suggestion: <fix>
+2. ..."""
 
     def execute(
         self,
@@ -594,14 +593,14 @@ Output Format (STRICT BINARY CHOICE):
             )
 
     def _parse_review_passed(self, response: str) -> bool:
-        """解析评审结果是否为通过（与 prompt 中 [Pass]/[Reject] 结构化输出一致）。"""
+        """Whether the review passed (matches [Pass]/[Reject] structured output)."""
         r = response.strip()
-        if "[Reject]" in r or "【Reject】" in r or "拒绝" in r:
+        if "[Reject]" in r:
             return False
-        return "[Pass]" in r or "通过" in r or "Pass" in r
+        return "[Pass]" in r
 
     def _build_reviewer_prompt(self, task: str, context: Dict[str, Any]) -> str:
-        """构建评审 prompt（占位符与 prompt 约定一致，便于后续可改为从模板加载）。"""
+        """Build reviewer prompt (format aligned with prompts/system/subagent-reviewer.md)."""
         plan = context.get("plan", "")
         code = context.get("code", "")
         return f"""Task: {task}
@@ -612,7 +611,7 @@ Implementation Plan (for architecture alignment):
 Code to Review:
 {code}
 
-请按结构化输出要求给出 [Pass] 或 [Reject]，并附具体反馈。"""
+Output [Pass] or [Reject] with specific feedback per the structured format."""
 
 
 class BashCapabilities(AgentCapabilities):

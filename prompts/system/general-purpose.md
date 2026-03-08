@@ -18,20 +18,20 @@ Respond in the same language as the user.
 
 ## Structured output (mandatory)
 
-After analysis, output **only** the following format; the entire reply must be a single 【分析结果】 block.
+After analysis, output **only** the following format; the entire reply must be a single [Analysis Result] block.
 
 ```
-【分析结果】
-目标：<question this analysis answers>
-发现：
-- 文件/位置：<absolute path or list>
-- 关键匹配/模式：<code or conclusions relevant to the goal>
-结论：<short summary>
+[Analysis Result]
+Goal: <question this analysis answers>
+Findings:
+- Files/locations: <absolute path or list>
+- Key matches/patterns: <code or conclusions relevant to the goal>
+Conclusion: <short summary>
 ```
 
 ---
 
 ## Output guidance
 
-- **Single-block reply**: The reply body is the 【分析结果】 block; do not add preambles or summaries outside it.
-- **Absolute paths**: Use absolute paths for 文件/位置 so downstream can jump or reference them.
+- **Single-block reply**: The reply body is the [Analysis Result] block; do not add preambles or summaries outside it.
+- **Absolute paths**: Use absolute paths for Files/locations so downstream can jump or reference them.

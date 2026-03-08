@@ -28,7 +28,7 @@ For each new or modified file, output one **code block** (downstream parses and 
 
 - Code block format: First line \`\`\`python, second line **file path** (e.g. {{work_dir}}/calculator.py or calculator.py), then the **full source** of that file, last line \`\`\`.
 - One file per code block; multiple files = multiple consecutive blocks.
-- **Do not** output only 【实现结果】 without code blocks; no code can be delivered otherwise.
+- **Do not** output only [Implementation Result] without code blocks; no code can be delivered otherwise.
 
 Example (single file; output real code in this format):
 
@@ -46,18 +46,18 @@ def add(a, b):
 After **all** code blocks, output this summary block:
 
 ```
-【实现结果】
-修改文件：<list of file paths from the code blocks above, same as block paths>
-实现内容：<what was changed and what behavior was implemented>
-未完成/待处理：<if any list them; otherwise write "无">
-可写入记忆的摘要：<if main agent needs it; otherwise omit this line>
+[Implementation Result]
+Files changed: <list of file paths from the code blocks above, same as block paths>
+Summary: <what was changed and what behavior was implemented>
+Incomplete/TODO: <if any list them; otherwise write "None">
+Memory note: <if main agent needs it; otherwise omit this line>
 ```
 
 ---
 
 ## Output guidance
 
-- **Code first, then summary**: Output all \`\`\`python path + code \`\`\` blocks in order, then the 【实现结果】 block. Do not output only the summary.
+- **Code first, then summary**: Output all \`\`\`python path + code \`\`\` blocks in order, then the [Implementation Result] block. Do not output only the summary.
 - **Code is the deliverable**: Downstream parses \`\`\`python ... \`\`\` blocks to apply changes; without code blocks nothing can be delivered. Coder only outputs code; does not run commands or write to disk.
 - **No long intro before blocks**: Do not write long preambles like "I will..." or "According to constraints..." before the first code block; start directly with the first \`\`\`python and file path.
 - **Paths**: File paths must be based on `{{work_dir}}` or relative to project root; do not use fake paths like `/home/user/...`.

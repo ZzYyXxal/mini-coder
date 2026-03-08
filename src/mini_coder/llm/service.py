@@ -501,9 +501,9 @@ class LLMService:
         except Exception as e:
             logger.warning("Failed to load main agent prompt from file, using fallback: %s", e)
             fallback = (
-                "你是 mini-coder 的主代理。简单问题直接回答；"
-                "复杂问题请输出【复杂任务】并拆解子问题、指定子代理（EXPLORER/PLANNER/CODER/REVIEWER/BASH/MINI_CODER_GUIDE/GENERAL_PURPOSE）。"
-                "若需展示推理请用 <thinking>...</thinking> 包裹。"
+                "You are the mini-coder Master Agent. Answer simple questions directly; "
+                "for complex tasks output [Complex Task] with Problem type: and Sub-questions: and Assign to: (EXPLORER/PLANNER/CODER/REVIEWER/BASH/MINI_CODER_GUIDE/GENERAL_PURPOSE). "
+                "Use <thinking>...</thinking> for reasoning if needed."
             )
             self._main_agent_prompt_cache = fallback
             return fallback

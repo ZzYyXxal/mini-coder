@@ -934,11 +934,11 @@ Constraints:
 """
 
     def _parse_review_passed(self, response: str) -> bool:
-        """解析评审结果是否为通过（与 prompt 中 [Pass]/[Reject] 一致）。"""
+        """Whether the review passed (matches [Pass]/[Reject] structured output)."""
         r = response.strip()
-        if "[Reject]" in r or "拒绝" in r:
+        if "[Reject]" in r:
             return False
-        return "[Pass]" in r or "通过" in r or "✅" in r
+        return "[Pass]" in r
 
     def _parse_review_result(self, response: str) -> str:
         """解析评审结果（返回原文供报告使用）。"""
@@ -1210,7 +1210,7 @@ class CoderAgent(BaseEnhancedAgent):
 
 **项目根目录（所有文件路径必须基于此，禁止使用 /home/user 等占位路径）**: {work_dir or "（未设置）"}
 
-**回复格式**：先按顺序输出每个文件的代码块（\`\`\`python 换行 文件路径 换行 完整源代码 \`\`\`），再输出【实现结果】摘要；不可只输出摘要不输出代码。
+**Output format**: Output each file's code block (```python, path, full source```) in order, then the [Implementation Result] summary; do not output only the summary without code.
 
 已有代码（若是重试）:
 {existing_code_str if existing_code_str else "无"}
