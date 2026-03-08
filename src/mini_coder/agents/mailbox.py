@@ -1,8 +1,12 @@
-"""Agent 间 Mailbox 消息与结构化回传 Schema。
+"""Agent 任务与结果的数据结构（供 Scheduler、Orchestrator 使用）。
 
-主 Agent 作为管理员：分解任务、投递 TaskBrief 给子代理、收集 SubagentResult。
-Blackboard 作为 Mailbox：定向投递（to_agent/from_agent），只共享关键信息，不共享全量 context。
-参考：AutoGen Magentic-One（Orchestrator + Task Ledger + Progress Ledger）、结构化 Handoff。
+本模块提供 TaskBrief、SubagentResult、ParallelTaskGroup 等**纯数据结构**，用于：
+- Scheduler 的 schedule_agent_single / schedule_agent_batch：任务描述与返回结果形态。
+- Orchestrator 的 dispatch_async / dispatch_parallel_async：构造任务并接收 SubagentResult。
+
+不再使用 Mailbox 机制：Blackboard 已移除 post_message/collect_messages/get_latest_task_brief/post_result；
+Agent 间应传递的数据由 Orchestrator 在调用 agent.execute(task, context=...) 时通过 context 显式传入，
+与 LangGraph 的显式状态传递一致。
 """
 
 import time

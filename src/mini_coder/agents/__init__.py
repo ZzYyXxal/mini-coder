@@ -108,20 +108,26 @@ from mini_coder.agents.output_parser import (
     # Enums
     MainAgentOutputType,
     ReviewerResultType,
+    UnifiedOutputType,
     # Data Classes
     SubTask,
     MainAgentOutput,
     ReviewerIssue,
     ReviewerOutput,
     QualityReport,
+    DirectDispatchOutput,
+    StepWithParams,
+    UnifiedOutput,
     # Parsers
     MainAgentParser,
     ReviewerParser,
     QualityReportParser,
+    UnifiedParser,
     # Convenience Functions
     parse_main_agent_output,
     parse_reviewer_output,
     parse_quality_report,
+    parse_unified_output,
 )
 
 __all__ = [
@@ -199,15 +205,21 @@ __all__ = [
     # Output Parsers
     "MainAgentOutputType",
     "ReviewerResultType",
+    "UnifiedOutputType",
     "SubTask",
     "MainAgentOutput",
     "ReviewerIssue",
     "ReviewerOutput",
     "QualityReport",
+    "DirectDispatchOutput",
+    "StepWithParams",
+    "UnifiedOutput",
     "MainAgentParser",
     "ReviewerParser",
     "QualityReportParser",
+    "UnifiedParser",
     "parse_main_agent_output",
     "parse_reviewer_output",
     "parse_quality_report",
+    "parse_unified_output",
 ]

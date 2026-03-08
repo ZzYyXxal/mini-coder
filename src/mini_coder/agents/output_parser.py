@@ -7,6 +7,9 @@ Main Agent:
 - [Complex Task] ... structured ...
 - [Cannot Handle] <reason>
 
+Unified Planner-Orchestrator (四类决策):
+- [Simple Answer] / [Direct Dispatch] / [Complex Task] / [Cannot Handle]
+
 Reviewer Agent:
 - [Pass] ...
 - [Reject] ... numbered issues ...
@@ -22,6 +25,171 @@ import re
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+# ----------------------------- Unified Planner-Orchestrator 四类输出 ------------------------------
+
+
+class UnifiedOutputType(Enum):
+    """统一 Planner-Orchestrator 输出类型。"""
+    SIMPLE_ANSWER = "simple_answer"
+    DIRECT_DISPATCH = "direct_dispatch"
+    COMPLEX_TASK = "complex_task"
+    CANNOT_HANDLE = "cannot_handle"
+    UNKNOWN = "unknown"
+
+
+@dataclass
+class DirectDispatchOutput:
+    """直接派发：单个 Agent + Task + 可选 Params。"""
+    agent: str
+    task: str
+    params: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class StepWithParams:
+    """复杂任务中的一步：Agent + Task + 可选 Params。"""
+    agent: str
+    task: str
+    params: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class UnifiedOutput:
+    """统一 Planner-Orchestrator 解析结果。"""
+    output_type: UnifiedOutputType
+    content: Optional[str] = None
+    direct_dispatch: Optional[DirectDispatchOutput] = None
+    problem_type: Optional[str] = None
+    implementation_plan: Optional[str] = None
+    steps: List[StepWithParams] = field(default_factory=list)
+    raw_text: str = ""
+
+
+class UnifiedParser:
+    """解析统一 Agent 的四类输出。"""
+
+    SIMPLE_ANSWER_PATTERN = re.compile(r'^\[Simple Answer\]\s*\n?(.*)', re.DOTALL)
+    CANNOT_HANDLE_PATTERN = re.compile(r'^\[Cannot Handle\]\s*\n?(.*)', re.DOTALL)
+
+    # [Direct Dispatch]\nAgent: X\nTask: ...\nParams:\nkey: value
+    DIRECT_DISPATCH_HEAD = re.compile(r'^\[Direct Dispatch\]\s*\n', re.IGNORECASE)
+    AGENT_LINE = re.compile(r'^Agent[：:]\s*(.+)$', re.MULTILINE)
+    TASK_LINE = re.compile(r'^Task[：:]\s*(.+?)(?=\n(?:Params|Agent|$))', re.DOTALL | re.MULTILINE)
+    PARAMS_BLOCK = re.compile(r'^Params[：:]\s*\n([\s\S]*?)(?=\n\n|\n\d+\.\s+Agent|\Z)', re.MULTILINE)
+
+    # [Complex Task]\nProblem type: ...\nImplementation plan (optional): ...\nSteps:\n1. Agent: ...
+    COMPLEX_HEAD = re.compile(r'^\[Complex Task\]\s*\n', re.IGNORECASE)
+    PROBLEM_TYPE_LINE = re.compile(r'^Problem type[：:]\s*(.+)$', re.MULTILINE)
+    STEP_ENTRY = re.compile(
+        r'^\s*(\d+)[.、．]\s*Agent[：:]\s*([A-Z_]+)\s*\n\s*Task[：:]\s*(.+?)(?=\n\d+[.、．]\s*Agent|\n\s*Params:|\Z)',
+        re.DOTALL | re.MULTILINE
+    )
+    STEP_PARAMS = re.compile(r'\s*Params[：:]\s*\n([\s\S]*?)(?=\n\d+[.、．]|\Z)', re.MULTILINE)
+
+    def parse(self, text: str) -> UnifiedOutput:
+        """解析统一 Agent 输出，返回四类之一。"""
+        text = text.strip()
+        # 去掉 <thinking>...</thinking> 再解析
+        thinking_end = text.rfind("</thinking>")
+        if thinking_end != -1:
+            text = text[thinking_end + len("</thinking>"):].strip()
+
+        # 1. [Simple Answer]
+        m = self.SIMPLE_ANSWER_PATTERN.match(text)
+        if m:
+            return UnifiedOutput(
+                output_type=UnifiedOutputType.SIMPLE_ANSWER,
+                content=m.group(1).strip(),
+                raw_text=text
+            )
+
+        # 2. [Cannot Handle]
+        m = self.CANNOT_HANDLE_PATTERN.match(text)
+        if m:
+            return UnifiedOutput(
+                output_type=UnifiedOutputType.CANNOT_HANDLE,
+                content=m.group(1).strip(),
+                raw_text=text
+            )
+
+        # 3. [Direct Dispatch]
+        if self.DIRECT_DISPATCH_HEAD.match(text):
+            body = text[text.find("]") + 1:].strip()
+            agent = ""
+            task = ""
+            params: Dict[str, Any] = {}
+            am = self.AGENT_LINE.search(body)
+            if am:
+                agent = am.group(1).strip().upper()
+            task_m = re.search(r'Task[：:]\s*(.+?)(?=\nParams[：:]|\n\s*$|\Z)', body, re.DOTALL)
+            if task_m:
+                task = task_m.group(1).strip()
+            params_m = self.PARAMS_BLOCK.search(body)
+            if params_m:
+                for line in params_m.group(1).strip().split("\n"):
+                    if ":" in line or "：" in line:
+                        k, _, v = line.partition(":")
+                        if not v and "：" in line:
+                            k, _, v = line.partition("：")
+                        if k and v is not None:
+                            params[k.strip()] = v.strip()
+            if agent:
+                return UnifiedOutput(
+                    output_type=UnifiedOutputType.DIRECT_DISPATCH,
+                    direct_dispatch=DirectDispatchOutput(agent=agent, task=task or body[:500], params=params),
+                    raw_text=text
+                )
+
+        # 4. [Complex Task]
+        if self.COMPLEX_HEAD.match(text):
+            rest = text[text.find("]") + 1:].strip()
+            problem_type = ""
+            impl_plan = ""
+            steps: List[StepWithParams] = []
+            pt = self.PROBLEM_TYPE_LINE.search(rest)
+            if pt:
+                problem_type = pt.group(1).strip()
+            # Steps: 后的 1. Agent: ... 2. Agent: ...
+            steps_start = rest.find("Steps:")
+            if steps_start == -1:
+                steps_start = rest.find("Steps：")
+            if steps_start != -1:
+                steps_text = rest[steps_start + 6:].strip()
+                for entry in self.STEP_ENTRY.finditer(steps_text):
+                    step_agent = entry.group(2).strip().upper()
+                    step_task = entry.group(3).strip()
+                    step_params: Dict[str, Any] = {}
+                    sp = self.STEP_PARAMS.search(steps_text[entry.end():])
+                    if sp:
+                        for line in sp.group(1).strip().split("\n"):
+                            if ":" in line or "：" in line:
+                                k, _, v = line.partition(":")
+                                if not v and "：" in line:
+                                    k, _, v = line.partition("：")
+                                if k and v is not None:
+                                    step_params[k.strip()] = v.strip()
+                    steps.append(StepWithParams(agent=step_agent, task=step_task, params=step_params))
+            if steps or problem_type:
+                return UnifiedOutput(
+                    output_type=UnifiedOutputType.COMPLEX_TASK,
+                    problem_type=problem_type or None,
+                    implementation_plan=impl_plan or None,
+                    steps=steps,
+                    raw_text=text
+                )
+
+        logger.warning("Failed to parse unified output: %s...", text[:150])
+        return UnifiedOutput(output_type=UnifiedOutputType.UNKNOWN, raw_text=text)
+
+
+def parse_unified_output(text: str) -> UnifiedOutput:
+    """解析统一 Planner-Orchestrator 输出。"""
+    return UnifiedParser().parse(text)
+
+
+# ----------------------------- Main Agent (legacy) ------------------------------
 
 
 class MainAgentOutputType(Enum):

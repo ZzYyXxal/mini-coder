@@ -57,7 +57,9 @@ class LLMService:
         self._enable_command_tool = enable_command_tool
         self._context_manager = None
         self._context_builder = None
+        self._memory_hook = None
         self._notes_manager = None
+        self._agent_memory_registry = None
         self._note_extractor = None
         self._command_tool = None
         self._tools_registry: Dict[str, Any] = {}
@@ -120,8 +122,11 @@ class LLMService:
 
         try:
             from mini_coder.memory import (
-                ContextMemoryManager, MemoryConfig, ContextBuilder,
-                ProjectNotesManager
+                ContextMemoryManager,
+                MemoryConfig,
+                ContextBuilder,
+                ProjectNotesManager,
+                MemoryHook,
             )
             import yaml
 
@@ -153,13 +158,29 @@ class LLMService:
                 max_tokens=128000,
                 notes_manager=self._notes_manager
             )
-
+            self._memory_hook = MemoryHook(
+                manager=self._context_manager,
+                context_builder=self._context_builder,
+            )
+            # 每 agent 独立记忆；仅 explorer/planner/coder 使用 NoteTool
+            from mini_coder.memory import AgentMemoryRegistry
+            self._agent_memory_registry = AgentMemoryRegistry(
+                base_storage_path=memory_config.storage_path,
+                notes_manager=self._notes_manager,
+                memory_config=memory_config,
+            )
         except ImportError:
             # memory 模块不可用，禁用记忆功能
             self._enable_memory = False
             self._context_manager = None
             self._context_builder = None
             self._notes_manager = None
+            self._memory_hook = None
+            self._agent_memory_registry = None
+
+    def get_agent_memory_registry(self):
+        """返回每 agent 独立记忆的注册表；仅 explorer/planner/coder 使用 NoteTool。未启用记忆时为 None。"""
+        return self._agent_memory_registry
 
     def _init_note_extractor(self) -> None:
         """Initialize note extractor for auto-extraction."""
@@ -437,6 +458,9 @@ class LLMService:
         # 添加助手响应到上下文
         if self._context_manager and response:
             self._context_manager.add_message("assistant", response)
+        # post-step：若触发压缩/淘汰则执行压缩与摘要（MemoryHook）
+        if self._memory_hook:
+            self._memory_hook.post_step()
 
         logger.debug("[LLMService] chat() completed, response length=%s", len(response) if response else 0)
         if logger.isEnabledFor(logging.DEBUG) and response:
@@ -542,25 +566,26 @@ class LLMService:
             yield {"type": "error", "content": processed_message}
             return
 
-        # 2. Pre-check (GSSC) - 仅触发 Plan B 压缩并收集统计，不在此处构建 context（合并为一次 build，见步骤 4）
+        # 2. Pre-step (MemoryHook)：加载前若触发压缩则先执行，保证有空间再构建 context
         compression_stats = {}
-        if self._context_builder:
+        if self._memory_hook:
+            t_before_pre = time.perf_counter()
+            self._memory_hook.pre_step(max_tokens=128000, run_compression_first=True)
+            logger.debug(
+                "[LLMService] chat_stream latency: memory_hook.pre_step=%.3fs",
+                time.perf_counter() - t_before_pre,
+            )
+        elif self._context_builder:
             t_before_compression = time.perf_counter()
             compression_stats = self._context_builder.run_compression_if_needed()
             logger.debug(
                 "[LLMService] chat_stream latency: run_compression_if_needed=%.3fs",
                 time.perf_counter() - t_before_compression,
             )
-
-            # 报告压缩结果（与原先 build_with_compression 的统计一致）
             if compression_stats.get("pruned_tokens", 0) > 0:
-                logger.info(f"[LLMService] Pruned {compression_stats['pruned_tokens']} tokens")
                 yield {"type": "system", "content": f"[已清理 {compression_stats['pruned_tokens']} tokens 的工具输出]"}
-
             if compression_stats.get("compressed_messages", 0) > 0:
-                count = compression_stats["compressed_messages"]
-                logger.info(f"[LLMService] Compressed {count} messages")
-                yield {"type": "system", "content": f"[已压缩 {count} 条消息]"}
+                yield {"type": "system", "content": f"[已压缩 {compression_stats['compressed_messages']} 条消息]"}
 
         # 3. Add - 添加用户消息到上下文
         if self._context_manager:
@@ -603,6 +628,17 @@ class LLMService:
         # 5. Complete - 添加完整响应到上下文
         if self._context_manager and full_response:
             self._context_manager.add_message("assistant", full_response)
+
+        # 5b. Post-step (MemoryHook)：若触发压缩/淘汰则执行压缩与摘要
+        if self._memory_hook:
+            post_stats = self._memory_hook.post_step()
+            if post_stats.get("pruned_tokens", 0) > 0:
+                logger.info(f"[LLMService] Post-step pruned {post_stats['pruned_tokens']} tokens")
+                yield {"type": "system", "content": f"[已清理 {post_stats['pruned_tokens']} tokens 的工具输出]"}
+            if post_stats.get("compressed_messages", 0) > 0:
+                count = post_stats["compressed_messages"]
+                logger.info(f"[LLMService] Post-step compressed {count} messages")
+                yield {"type": "system", "content": f"[已压缩 {count} 条消息]"}
 
         logger.debug("[LLMService] chat_stream() completed, response length=%s", len(full_response))
         if logger.isEnabledFor(logging.DEBUG) and full_response:
@@ -666,17 +702,15 @@ class LLMService:
             yield {"type": "error", "content": processed_message}
             return
 
-        # 2. Pre-check (GSSC) - 仅触发 Plan B 压缩并收集统计，不在此处构建 context
-        compression_stats = {}
-        if self._context_builder:
+        # 2. Pre-step (MemoryHook) 或 GSSC 压缩
+        if self._memory_hook:
+            self._memory_hook.pre_step(max_tokens=128000, run_compression_first=True)
+        elif self._context_builder:
             compression_stats = self._context_builder.run_compression_if_needed()
-
             if compression_stats.get("pruned_tokens", 0) > 0:
                 yield {"type": "system", "content": f"[已清理 {compression_stats['pruned_tokens']} tokens 的工具输出]"}
-
             if compression_stats.get("compressed_messages", 0) > 0:
-                count = compression_stats["compressed_messages"]
-                yield {"type": "system", "content": f"[已压缩 {count} 条消息]"}
+                yield {"type": "system", "content": f"[已压缩 {compression_stats['compressed_messages']} 条消息]"}
 
         # 3. Add - 添加用户消息到上下文
         if self._context_manager:
@@ -712,6 +746,13 @@ class LLMService:
         # 5. Complete - 添加完整响应到上下文
         if self._context_manager and full_response:
             self._context_manager.add_message("assistant", full_response)
+        # Post-step (MemoryHook)
+        if self._memory_hook:
+            post_stats = self._memory_hook.post_step()
+            if post_stats.get("pruned_tokens", 0) > 0:
+                yield {"type": "system", "content": f"[已清理 {post_stats['pruned_tokens']} tokens 的工具输出]"}
+            if post_stats.get("compressed_messages", 0) > 0:
+                yield {"type": "system", "content": f"[已压缩 {post_stats['compressed_messages']} 条消息]"}
 
     def clear_history(self) -> None:
         """清除对话历史。"""

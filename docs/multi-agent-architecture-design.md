@@ -1,8 +1,9 @@
 # Mini-Coder 多 Agent 系统架构设计
 
-> **版本**: 2.0
-> **最后更新**: 2026-03-04
-> **设计目标**: 基于"代码框架 + 动态提示词注入"混合模式，实现 5 个专业化子代理的 coding agent 系统
+> **版本**: 3.0
+> **最后更新**: 2026-03-08
+> **重大变更**: Main Agent 与 Planner 合并为统一 Planner-Orchestrator
+> **设计目标**: 基于"统一决策 Agent + 专业化子代理"的 coding agent 系统
 
 ---
 
@@ -12,16 +13,17 @@
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
-│                         主代理 (Main Agent)                              │
-│  身份：协调者 + 记忆管理 + 终端执行                                       │
-│  能力：理解意图、派发子代理、读写记忆、执行命令（带安全策略）               │
+│                统一 Planner-Orchestrator Agent                          │
+│  身份：决策中枢 + 需求分析 + TDD 规划                                      │
+│  决策：自己直接回答 / 直接派发 / 复杂任务拆解 / 无法完成请用户澄清          │
+│  能力：一次 LLM 调用完成判断与规划，替代原先「主代理只出文本 + 路由再派发」  │
 └───────────────────────────────┬─────────────────────────────────────────┘
-                                │ 按任务类型派发
+                                │ 按四类决策执行
         ┌───────────────────────┼───────────────────────┐
         ▼                       ▼                       ▼
 ┌───────────────┐     ┌───────────────┐     ┌───────────────┐
 │   Explorer    │     │    Planner    │     │    Coder      │
-│  (只读探索)    │     │  (规划分析)   │     │ (代码生成)     │
+│  (只读探索)    │     │  (TDD 规划)   │     │ (代码生成)     │
 │  Read-only    │     │  Analysis     │     │  Write/Edit   │
 └───────────────┘     └───────────────┘     └───────────────┘
                                                 │
@@ -38,14 +40,24 @@
 
 | 角色 | 身份 | 工具范围 | 何时使用 |
 |------|------|----------|----------|
-| **主代理** | 协调者、记忆与终端执行 | 全部（含记忆、终端、派发子代理） | 理解请求、派发、汇总、执行命令、更新记忆 |
+| **统一 Planner-Orchestrator** | 决策中枢、需求分析、TDD 规划 | 无（只做决策与规划，不直接调用工具） | 每轮用户输入首先由此 Agent 处理，做四类决策 |
 | **Explorer** | 只读代码库搜索 | Read, Grep, Glob | 需要"先搞清楚代码结构/位置"且不修改时 |
 | **Planner** | 需求分析与任务规划 | Read, Grep, WebSearch | 需要拆解复杂任务、制定实现计划时 |
 | **Coder** | 代码生成与编辑 | Read, Write, Edit, Grep, Glob | 实现新功能、按需求写代码 |
 | **Reviewer** | 代码质量评审 | Read, Grep, Glob | 代码完成后评审质量、检查规范 |
 | **Bash** | 终端执行与测试验证 | Read, Bash, Glob | 运行测试、执行命令、验证质量 |
 
-### 1.3 实现机制："代码框架 + 动态提示词注入"
+### 1.3 核心架构变革：统一 Planner-Orchestrator
+
+**旧架构问题**：
+- 主代理只输出文本，再由 `_analyze_intent()` 做意图分析派发
+- 两个独立的 LLM 调用（主代理 + 意图分析），割裂且低效
+- 无法在规划阶段同时决定派发策略
+
+**新架构优势**：
+- **一次 LLM 调用完成判断与规划**：统一 Agent 直接输出四类决策之一
+- **四类决策**：自己直接回答 / 直接派发单 agent / 复杂任务多步派发 / 无法完成请用户澄清
+- **结构化输出**：下游可直接解析 `Agent:`, `Task:`, `Params:`, `Steps:` 并执行
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -88,7 +100,7 @@
 ### 2.2 提示词设计原则
 
 ```
-主代理提示词 = 身份段 + 派发规则段 + 记忆段 + 终端安全段 + 输出段
+统一 Agent 提示词 = 身份段 + 四类决策格式 + 子代理列表 + 输出约束
 子代理提示词 = 身份段 + 工具约束段 + 行为准则段 + 输出要求段
 ```
 
@@ -102,37 +114,92 @@
 
 ## 3. 各 Agent 详细设计
 
-### 3.1 主代理 (Main Agent)
+### 3.1 统一 Planner-Orchestrator Agent
 
 **身份与角色**:
 ```
-你是简易 Coding Agent 的主代理，负责：
-1. 协调者 - 理解用户请求，派发合适的子代理
-2. 记忆管理 - 读取/写入持久记忆，保留项目要点、用户偏好
-3. 终端执行 - 在安全策略下执行终端命令
+你是统一 Planner-Orchestrator Agent，负责：
+1. 决策中枢 - 接收用户消息后做四类决策
+2. 需求分析 - 理解用户需求，识别问题类型
+3. TDD 规划 - 在复杂任务中产出 implementation_plan
+4. 派发驱动 - 不写代码、不执行命令，只做决策与规划，驱动子代理执行
 ```
 
-**工具权限**: 全部工具（包括子代理派发、记忆读写、终端命令执行）
+**四类决策（输出必须且仅能选其一）**:
+
+| 决策类型 | 输出格式 | 适用场景 |
+|---------|---------|---------|
+| **自己直接回答** | `[Simple Answer]` + 内容 | 寒暄、概念性问答、无需工具与改代码的解释 |
+| **直接派发** | `[Direct Dispatch]` + Agent + Task + Params | 明确由一个子代理即可完成，任务与参数清晰 |
+| **复杂任务** | `[Complex Task]` + Problem type + Steps | 需多步、多子代理协作，拆成子任务并标明每步由谁做 |
+| **无法完成** | `[Cannot Handle]` + 原因 | 当前无法完成，需用户澄清或补充信息 |
+
+**输出格式示例**:
+
+1. 自己直接回答：
+```
+[Simple Answer]
+<直接回答的正文>
+```
+
+2. 直接派发：
+```
+[Direct Dispatch]
+Agent: CODER
+Task: 实现用户登录功能，包含表单验证和 JWT 认证
+Params:
+work_dir: /path/to/project
+```
+
+3. 复杂任务：
+```
+[Complex Task]
+Problem type: 新功能开发
+
+Implementation plan:
+1. 先写测试用例（TDD Red）
+2. 实现核心逻辑（TDD Green）
+3. 重构优化
+
+Steps:
+1. Agent: PLANNER
+   Task: 拆解登录功能的 TDD 实现计划
+2. Agent: CODER
+   Task: 按计划实现登录功能
+   Params:
+   tdd_mode: true
+3. Agent: REVIEWER
+   Task: 评审代码质量与架构对齐
+4. Agent: BASH
+   Task: 运行测试验证
+   Params:
+   bash_mode: quality_report
+```
+
+4. 无法完成：
+```
+[Cannot Handle]
+需要明确：1) 目标文件路径 2) 具体要实现的功能点
+```
 
 **派发规则**:
 ```
-用户请求 → 主代理分析 → 派发决策
+用户请求 → 统一 Agent 四类决策 → 执行
 
-├─ "看看/找找/分析代码结构" → Explorer
-├─ "规划/拆解/设计/方案" → Planner
-├─ "实现/添加/修改/写代码" → Coder
-├─ "评审/检查/质量/规范" → Reviewer
-└─ "测试/运行/执行命令" → Bash
+├─ [Simple Answer] → 直接返回回答
+├─ [Direct Dispatch] → 创建指定子代理并执行
+├─ [Complex Task] → 按 Steps 顺序依次派发
+└─ [Cannot Handle] → 返回原因，等待用户澄清
 ```
 
-**记忆读写时机**:
-```
-会话开始 → 主代理读取相关记忆 → 用于理解上下文
-    │
-    └─→ 子代理执行任务
-         │
-         └─→ 主代理汇总 → 解析「可写入记忆的摘要」→ 写入记忆
-```
+**子代理列表**（名称必须 UPPERCASE 英文）:
+- `EXPLORER` - 只读探索代码库
+- `PLANNER` - TDD 规划/写 implementation_plan
+- `CODER` - 写代码/改文件
+- `REVIEWER` - 代码评审
+- `BASH` - 终端/测试执行
+- `MINI_CODER_GUIDE` - 使用指南
+- `GENERAL_PURPOSE` - 通用只读
 
 ### 3.2 Explorer (只读探索)
 
@@ -253,7 +320,7 @@
 
 ## 4. 工作流设计
 
-### 4.1 标准工作流（完整流程）
+### 4.1 统一 Agent 决策流程
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -261,71 +328,84 @@
 └──────────────────────────┬──────────────────────────────────────┘
                            ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│                       主代理分析                                  │
-│  1. 理解意图  2. 检查记忆  3. 决定派发策略                        │
+│                  统一 Planner-Orchestrator                       │
+│           一次 LLM 调用完成判断与规划                              │
 └──────────────────────────┬──────────────────────────────────────┘
                            ▼
          ┌─────────────────┼─────────────────┐
          ▼                 ▼                 ▼
    ┌──────────┐     ┌──────────┐     ┌──────────┐
-   │ Explorer │     │ Planner  │     │  Coder   │
-   │  探索    │ ──▶ │  规划    │ ──▶ │  实现    │
-   └──────────┘     └──────────┘     └────┬─────┘
-                                          │
-                                          ▼
-                                   ┌──────────────┐
-                                   │  Reviewer    │
-                                   │   评审       │
-                                   └──────┬───────┘
-                                          │
-                            ┌─────────────┴─────────────┐
-                            │ 通过？                     │
-                            │ 是 ↓    │    否 ↓         │
-                            ▼         ▼                 ▼
-                     ┌────────────┐            ┌────────────┐
-                     │    Bash    │            │   Coder    │
-                     │   测试验证  │            │   修正     │
-                     └─────┬──────┘            └─────┬──────┘
-                           │                         │
-                           │         ┌───────────────┘
-                           │         ▼
-                           │    ┌──────────┐
-                           └───▶│ Reviewer │ (再次评审)
-                                └──────────┘
-                                     │
-                                     ▼
-                               ┌────────────┐
-                               │   完成     │
-                               │ 更新记忆   │
-                               └────────────┘
+   │ [Simple  │     │ [Direct  │     │ [Complex │
+   │  Answer] │     │ Dispatch]│     │  Task]   │
+   └────┬─────┘     └────┬─────┘     └────┬─────┘
+        │                │                │
+        ▼                ▼                ▼
+   直接返回回答     创建指定子代理      按 Steps 顺序
+                   并执行            依次派发
 ```
 
-### 4.2 简化工作流（简单任务）
+### 4.2 标准工作流（复杂任务）
+
+当统一 Agent 输出 `[Complex Task]` 时：
 
 ```
-用户请求 → 主代理 → Coder → Reviewer → Bash → 完成
-         (直接派发，跳过规划)
+用户请求
+    │
+    ▼
+统一 Agent 输出 [Complex Task]
+    │
+    ├─ Problem type: 新功能开发
+    ├─ Implementation plan: TDD 步骤
+    └─ Steps:
+        1. Agent: EXPLORER → 探索代码结构
+        2. Agent: PLANNER → 制定实现计划
+        3. Agent: CODER → 实现代码
+        4. Agent: REVIEWER → 评审
+        5. Agent: BASH → 测试验证
+    │
+    ▼
+Orchestrator.run_unified() 按 Steps 顺序执行
+    │
+    ▼
+每步：dispatch_with_agent(agent_type, task, params)
 ```
 
-适用于：小修复、单文件修改、明确的代码添加
+### 4.3 直接派发工作流（简单任务）
 
-### 4.3 探索工作流（复杂任务）
-
-```
-用户请求 → 主代理 → Explorer → Planner → Coder → Reviewer → Bash → 完成
-         (先探索代码结构)  (再制定计划)   (再实现)
-```
-
-适用于：新功能开发、跨模块修改、需要理解现有代码的任务
-
-### 4.4 修复工作流（Bug 修复）
+当统一 Agent 输出 `[Direct Dispatch]` 时：
 
 ```
-用户请求 + 报错信息 → 主代理 → Fixer(Bash 角色) → Reviewer → Bash → 完成
-                      (直接派发修复)      (验证修复)
+用户请求
+    │
+    ▼
+统一 Agent 输出 [Direct Dispatch]
+    │
+    ├─ Agent: CODER
+    ├─ Task: 实现登录功能
+    └─ Params: work_dir: /path/to/project
+    │
+    ▼
+Orchestrator.dispatch_with_agent(CODER, task, params)
+    │
+    ▼
+CoderAgent 执行并返回结果
 ```
 
-适用于：有明确报错信息的 Bug 修复
+### 4.4 简化工作流（直接回答）
+
+当统一 Agent 输出 `[Simple Answer]` 时：
+
+```
+用户请求
+    │
+    ▼
+统一 Agent 输出 [Simple Answer]
+    │
+    ▼
+直接返回回答内容，无需派发子代理
+```
+
+适用于：寒暄、概念性问答、无需工具与改代码的解释
 
 ---
 
@@ -335,63 +415,103 @@
 
 ```
 mini-coder/
-├── docs/
-│   └── knowledge-base/mini-coder-agent-prompts/
-│       ├── main-agent.md              # 主代理系统提示词
-│       ├── subagent-explorer.md       # Explorer 子代理系统提示词
-│       ├── subagent-planner.md        # Planner 子代理系统提示词
-│       ├── subagent-coder.md          # Coder 子代理系统提示词
-│       ├── subagent-reviewer.md       # Reviewer 子代理系统提示词
-│       └── subagent-bash.md           # Bash 子代理系统提示词
-├── config/
-│   └── agents.yaml                    # Agent 配置（可选）
-└── src/mini_coder/
-    └── agents/
-        ├── __init__.py
-        ├── base.py                    # Agent 基类
-        ├── main.py                   # 主代理
-        ├── explorer.py               # Explorer 子代理
-        ├── planner.py                # Planner 子代理
-        ├── coder.py                  # Coder 子代理
-        ├── reviewer.py               # Reviewer 子代理
-        ├── bash.py                   # Bash 子代理
-        └── blackboard.py             # 黑板模式
+├── prompts/system/
+│   ├── unified-planner-orchestrator.md  # 统一 Agent 系统提示词（核心）
+│   ├── subagent-explorer.md              # Explorer 子代理系统提示词
+│   ├── subagent-planner.md               # Planner 子代理系统提示词
+│   ├── subagent-coder.md                 # Coder 子代理系统提示词
+│   ├── subagent-reviewer.md              # Reviewer 子代理系统提示词
+│   └── subagent-bash.md                  # Bash 子代理系统提示词
+├── src/mini_coder/
+│   └── agents/
+│       ├── __init__.py
+│       ├── base.py                       # Agent 基类
+│       ├── enhanced.py                   # 增强型 Agent（PlannerAgent, CoderAgent 等）
+│       ├── orchestrator.py               # 工作流协调器（含 run_unified）
+│       ├── output_parser.py              # 统一 Agent 输出解析器
+│       ├── prompt_loader.py              # 提示词加载器
+│       └── mailbox.py                    # Agent 间消息传递
 ```
 
-### 5.2 提示词加载与插值
+### 5.2 统一 Agent 提示词结构
 
-**加载方式**（混合方案）:
-```python
-class PromptLoader:
-    """提示词加载器"""
+统一 Agent 提示词（`unified-planner-orchestrator.md`）包含：
 
-    def __init__(self, prompt_dir: str = "knowledge-base/mini-coder-agent-prompts"):
-        self.prompt_dir = Path(prompt_dir)
-        self._cache: Dict[str, str] = {}
-
-    def load(self, agent_type: str, context: Dict = None) -> str:
-        """加载并插值提示词"""
-        # 1. 从缓存或文件读取
-        if agent_type not in self._cache:
-            file_path = self.prompt_dir / f"{agent_type}.md"
-            self._cache[agent_type] = file_path.read_text(encoding="utf-8")
-
-        # 2. 占位符替换
-        prompt = self._cache[agent_type]
-        if context:
-            for key, value in context.items():
-                prompt = prompt.replace(f"{{{{{key}}}}}", str(value))
-
-        return prompt
-```
-
-**占位符示例**:
 ```markdown
-你是 {{AGENT_NAME}} Agent。
+# Unified Planner-Orchestrator Agent
 
-可用工具：{{ALLOWED_TOOLS}}
-探索深度：{{thoroughness}}
-项目规范：{{coding_standards}}
+**Role**: 接收用户消息后做四类决策：自己直接回答、直接派发单个子代理、
+复杂任务拆成多步并指定每步由谁做（及参数）、或无法完成且需用户澄清。
+
+**When to use**: 用户每轮自然语言输入均由本 Agent 先处理；不写代码、
+不执行命令，只做决策与规划，并驱动子代理执行。
+
+---
+
+## 四类决策（输出必须且仅能选其一）
+
+1. **自己直接回答**：寒暄、概念性问答、无需工具与改代码的解释。
+2. **直接派发**：明确由**一个**子代理即可完成，且任务与参数清晰。
+3. **复杂任务**：需多步、多子代理协作；拆成子任务并标明每步由哪个 Agent 做。
+4. **无法完成**：当前无法完成且没有合适子代理可完成，需用户澄清。
+
+---
+
+## 子代理列表（名称必须 UPPERCASE 英文）
+
+EXPLORER, PLANNER, CODER, REVIEWER, BASH, MINI_CODER_GUIDE, GENERAL_PURPOSE
+
+---
+
+## 结构化输出格式
+
+### 1. 自己直接回答
+[Simple Answer]
+<内容>
+
+### 2. 直接派发
+[Direct Dispatch]
+Agent: <AGENT_NAME>
+Task: <任务描述>
+Params:
+<可选参数>
+
+### 3. 复杂任务
+[Complex Task]
+Problem type: <类型>
+Implementation plan: <可选>
+Steps:
+1. Agent: <AGENT_NAME>
+   Task: <任务>
+   Params: <可选>
+
+### 4. 无法完成
+[Cannot Handle]
+<原因与建议>
+```
+
+### 5.3 输出解析器
+
+`output_parser.py` 负责解析统一 Agent 的结构化输出：
+
+```python
+class UnifiedOutputType(Enum):
+    SIMPLE_ANSWER = "simple_answer"
+    DIRECT_DISPATCH = "direct_dispatch"
+    COMPLEX_TASK = "complex_task"
+    CANNOT_HANDLE = "cannot_handle"
+    UNKNOWN = "unknown"
+
+@dataclass
+class UnifiedOutput:
+    output_type: UnifiedOutputType
+    content: Optional[str] = None
+    direct_dispatch: Optional[DirectDispatchOutput] = None
+    steps: List[StepWithParams] = field(default_factory=list)
+
+def parse_unified_output(text: str) -> UnifiedOutput:
+    """解析统一 Agent 输出，返回四类之一"""
+    ...
 ```
 
 ---
@@ -469,18 +589,52 @@ class BaseAgent(ABC):
         raise NotImplementedError
 ```
 
-### 6.2 黑板模式（共享上下文）
+### 6.2 黑板模式（共享上下文、工件与进度追踪）
+
+Blackboard 承载**工作流/会话级**的上下文、工件与进度追踪，与 LangGraph 的「显式状态传递」一致：
+
+- **共享上下文**：`work_dir`、`requirement`、`task_id` 等，由 Orchestrator 写入；子 Agent 通过 **dispatch_context** 在 `agent.execute(task, context=...)` 时显式注入获取。
+- **工件存储**：`implementation_plan.md`（Planner 写）、`code:*`（Coder 写）；Reviewer 等由 Orchestrator 通过 **\_inject_reviewer_context** 从 Blackboard 取出并注入到本次调用的 `context`。
+- **进度追踪**：步骤执行状态、文件变更记录、当前阶段等；供统一 Agent 查询项目进度。
 
 ```python
+@dataclass
+class StepProgress:
+    """步骤进度追踪"""
+    step_id: str                          # 步骤 ID，如 "1.1", "1.2"
+    description: str                      # 步骤描述
+    status: str = "pending"               # "pending" | "in_progress" | "completed" | "failed"
+    agent: str = ""                       # 负责执行的 Agent
+    started_at: Optional[float] = None
+    completed_at: Optional[float] = None
+    output_summary: str = ""
+    error: str = ""
+
+
+@dataclass
+class FileChangeRecord:
+    """文件变更记录"""
+    path: str                             # 文件路径
+    action: str                           # "created" | "modified" | "deleted"
+    by: str                               # 执行的 Agent
+    at: float                             # 变更时间
+    summary: str = ""                     # 变更摘要
+
+
 class Blackboard:
-    """共享黑板 - Agent 间共享上下文和工件"""
+    """共享黑板 - 上下文、工件与进度追踪"""
 
     def __init__(self, task_id: str):
         self.task_id = task_id
-        self._artifacts: Dict[str, Any] = {}
+        self._artifacts: Dict[str, BlackboardArtifact] = {}
         self._context: Dict[str, Any] = {}
         self._event_log: List[Event] = []
+        # 进度追踪（新增）
+        self._step_progress: Dict[str, StepProgress] = {}
+        self._file_changes: List[FileChangeRecord] = []
+        self._current_phase: str = ""
 
+    # === 工件管理 ===
     def add_artifact(self, name: str, content: Any, content_type: str, created_by: str):
         """添加工件"""
         self._artifacts[name] = {
@@ -504,6 +658,60 @@ class Blackboard:
     def log_event(self, event: Event):
         """记录事件"""
         self._event_log.append(event)
+
+    # === 进度追踪方法（新增） ===
+
+    def init_steps_from_plan(self, plan_content: str) -> None:
+        """从 implementation_plan 初始化步骤进度"""
+        ...
+
+    def mark_step_started(self, step_id: str, agent: str) -> None:
+        """标记步骤开始执行"""
+        ...
+
+    def mark_step_completed(self, step_id: str, output_summary: str = "") -> None:
+        """标记步骤完成"""
+        ...
+
+    def mark_step_failed(self, step_id: str, error: str) -> None:
+        """标记步骤失败"""
+        ...
+
+    def record_file_change(self, path: str, action: str, by: str) -> None:
+        """记录文件变更（created/modified/deleted）"""
+        ...
+
+    def get_progress_summary(self) -> Dict[str, Any]:
+        """获取进度摘要：总步骤数、完成数、进度百分比、文件变更等"""
+        ...
+
+    def get_formatted_progress(self) -> str:
+        """获取格式化的进度报告（供统一 Agent 或用户查询使用）"""
+        ...
+```
+
+**进度追踪使用示例**：
+
+```python
+# 1. Planner 产出 implementation_plan 后初始化步骤
+plan_content = blackboard.get_artifact_content("implementation_plan.md")
+blackboard.init_steps_from_plan(plan_content)
+
+# 2. Orchestrator 派发任务时标记步骤开始
+blackboard.mark_step_started("1.1", "CODER")
+
+# 3. Agent 执行完成时标记步骤完成
+blackboard.mark_step_completed("1.1", "实现了登录验证功能")
+
+# 4. Coder 写文件时记录变更
+blackboard.record_file_change("src/auth/login.py", "created", "CODER")
+
+# 5. 查询进度
+progress = blackboard.get_formatted_progress()
+# 输出:
+# **项目进度**: 2/5 步骤完成 (40%)
+# **当前执行**: 步骤 1.3
+# **文件变更**: 新增 1 个，修改 2 个
 ```
 
 ### 6.3 工具过滤器
@@ -646,33 +854,72 @@ workflow:
 
 | 模块/类 | 路径 | 职责 | 与新架构对应 |
 |--------|------|------|------------|
-| **主代理/协调层** | `src/mini_coder/agents/orchestrator.py` | 工作流状态机、派发子代理 | 主代理"理解请求、派发、汇总" |
-| **Agent 基类** | `src/mini_coder/agents/base.py` | `BaseAgent`, `AgentConfig` | 子代理继承基类 |
-| **子代理实现** | `src/mini_coder/agents/enhanced.py` | `PlannerAgent`, `CoderAgent`, `TesterAgent` | 可扩展为 5 个独立子代理 |
-| **工具过滤** | `src/mini_coder/tools/filter.py` | `ReadOnlyFilter`, `FullAccessFilter` | Explorer 用只读，Coder/Fixer 用完全访问 |
-| **黑板** | `src/mini_coder/agents/enhanced.py` | `Blackboard` 类 | 共享上下文 |
+| **统一 Agent** | `orchestrator.run_unified()` | 四类决策、TDD 规划、派发驱动 | 替代原「主代理只出文本 + 路由再派发」 |
+| **输出解析** | `agents/output_parser.py` | 解析 `[Simple Answer]` 等四类输出 | 新增，统一 Agent 专用 |
+| **派发执行** | `orchestrator.dispatch_with_agent()` | 按解析结果创建并执行子代理 | 复用原有派发逻辑 |
+| **Agent 基类** | `agents/base.py` | `BaseAgent`, `AgentConfig` | 子代理继承基类 |
+| **子代理实现** | `agents/enhanced.py` | `PlannerAgent`, `CoderAgent`, `BashAgent` 等 | 5 个专业化子代理 |
+| **工具过滤** | `tools/filter.py` | `ReadOnlyFilter`, `FullAccessFilter` | Explorer/Reviewer 用只读，Coder 用完全访问 |
+| **黑板** | `agents/enhanced.py` | `Blackboard` 类 | 仅共享上下文与工件；Agent 间数据经 dispatch_context 显式传递，不再使用 Mailbox |
+| **调试日志** | `utils/debug_logger.py` | 诊断 Agent 间上下文传递 | 新增，用于调试 |
 
-### 8.2 扩展建议
+### 8.2 核心流程：run_unified()
 
-若引入新的 5 子代理模式（Explorer, Planner, Coder, Reviewer, Bash），可：
+```python
+def run_unified(self, user_message: str, context: Dict = None) -> EnhancedAgentResult:
+    """统一 Planner-Orchestrator：先由统一 Agent 做四类决策，再按解析结果执行。"""
+    # 1. 加载统一 Agent 提示词
+    system_prompt = PromptLoader().load("unified-planner-orchestrator")
 
-1. **新增独立 Agent 类**:
-   - 在 `enhanced.py` 或独立文件中创建 `ExplorerAgent`, `PlannerAgent`, `CoderAgent`, `ReviewerAgent`, `BashAgent`
-   - 每个类继承 `BaseEnhancedAgent`
-   - 覆盖 `get_system_prompt()` 返回对应提示词
+    # 2. 一次 LLM 调用
+    response = self.llm_service.chat_one_shot(system_prompt, user_message)
 
-2. **工具过滤器映射**:
-   - `ExplorerAgent` → `ReadOnlyFilter`
-   - `PlannerAgent` → `ReadOnlyFilter`（或宽松一些）
-   - `CoderAgent` → `FullAccessFilter`
-   - `ReviewerAgent` → `ReadOnlyFilter`
-   - `BashAgent` → 自定义 `BashRestrictedFilter`
+    # 3. 解析输出
+    parsed = parse_unified_output(response)
 
-3. **主代理逻辑**（在 `orchestrator.py`）:
-   - 根据用户输入决定派发哪个子代理
-   - 创建对应 Agent 实例，注入任务与上下文
-   - 执行并收集 `AgentResult`
-   - 汇总并可选写记忆
+    # 4. 按四类决策执行
+    if parsed.output_type == UnifiedOutputType.SIMPLE_ANSWER:
+        return EnhancedAgentResult(success=True, output=parsed.content)
+
+    if parsed.output_type == UnifiedOutputType.DIRECT_DISPATCH:
+        return self.dispatch_with_agent(
+            SubAgentType[parsed.direct_dispatch.agent],
+            parsed.direct_dispatch.task,
+            context=parsed.direct_dispatch.params
+        )
+
+    if parsed.output_type == UnifiedOutputType.COMPLEX_TASK:
+        outputs = []
+        for step in parsed.steps:
+            result = self.dispatch_with_agent(
+                SubAgentType[step.agent],
+                step.task,
+                context=step.params
+            )
+            outputs.append(result.output)
+        return EnhancedAgentResult(success=True, output="\n".join(outputs))
+
+    if parsed.output_type == UnifiedOutputType.CANNOT_HANDLE:
+        return EnhancedAgentResult(success=True, output=parsed.content)
+
+    return EnhancedAgentResult(success=True, output=parsed.raw_text)
+```
+
+### 8.3 TUI 路由变化
+
+**旧流程（已废弃）**：
+```
+用户输入 → console_app._route_user_input() → orchestrator.dispatch()
+         → _analyze_intent()（关键词 + LLM 兜底） → 创建子代理 → 执行
+```
+
+**新流程（统一 Agent）**：
+```
+用户输入 → console_app.main 路由 → orchestrator.run_unified()
+         → 统一 Agent LLM 调用（一次完成决策与规划）
+         → parse_unified_output() 解析
+         → 按 [Simple Answer] / [Direct Dispatch] / [Complex Task] / [Cannot Handle] 执行
+```
 
 ---
 
@@ -714,40 +961,37 @@ workflow:
 
 ## 附录 A：提示词模板示例
 
-### A.1 主代理提示词模板
+### A.1 统一 Planner-Orchestrator 提示词模板
 
 ```markdown
-## 身份与角色
+# Unified Planner-Orchestrator Agent
 
-你是简易 Coding Agent 的主代理，负责：
-1. 协调者 - 理解用户请求，派发合适的子代理
-2. 记忆管理 - 读取/写入持久记忆
-3. 终端执行 - 在安全策略下执行终端命令
+**Role**: 接收用户消息后做四类决策：自己直接回答、直接派发单个子代理、
+复杂任务拆成多步并指定每步由谁做（及参数）、或无法完成且需用户澄清。
 
-## 派发规则
+**When to use**: 用户每轮自然语言输入均由本 Agent 先处理；不写代码、
+不执行命令，只做决策与规划，并驱动子代理执行。
 
-- **Explorer**: "看看/找找/分析代码结构" → 只读探索
-- **Planner**: "规划/拆解/设计/方案" → 任务规划
-- **Coder**: "实现/添加/修改/写代码" → 代码实现
-- **Reviewer**: "评审/检查/质量/规范" → 代码评审
-- **Bash**: "测试/运行/执行命令" → 终端执行
+---
 
-## 记忆系统
+## 四类决策（输出必须且仅能选其一）
 
-读取：会话开始读取相关记忆
-写入：子代理完成后，解析「可写入记忆的摘要」并保存
+1. **自己直接回答**：寒暄、概念性问答、无需工具与改代码的解释。
+2. **直接派发**：明确由**一个**子代理即可完成，且任务与参数清晰。
+3. **复杂任务**：需多步、多子代理协作；拆成子任务并标明每步由哪个 Agent 做。
+4. **无法完成**：当前无法完成且没有合适子代理可完成，需用户澄清。
 
-## 终端命令执行
+---
 
-仅你可发起终端执行
-白名单：pytest, mypy, flake8, python, ls, cat
-需确认：pip install, git commit
-黑名单：rm -rf, mkfs, chmod 777
+## 子代理列表
 
-## 输出与汇总
+EXPLORER, PLANNER, CODER, REVIEWER, BASH, MINI_CODER_GUIDE, GENERAL_PURPOSE
 
-子代理返回后，用简洁自然语言汇报结果
-引用文件使用绝对路径或项目内相对路径
+---
+
+## 输出格式
+
+[Simple Answer] / [Direct Dispatch] / [Complex Task] / [Cannot Handle]
 ```
 
 ### A.2 Explorer 提示词模板

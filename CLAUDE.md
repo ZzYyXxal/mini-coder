@@ -79,7 +79,8 @@ bash claude_code_env.sh
 ## Multi-Agent 架构要点
 
 - **提示词**：`prompts/system/*.md`，占位符 `{{identifier}}`，缺文件时使用内置兜底。
-- **派发**：`WorkflowOrchestrator._analyze_intent()`（关键词 + LLM 兜底）、`dispatch()` / `dispatch_async()` / `dispatch_parallel_async()`。
+- **统一 Planner-Orchestrator**：Main Agent 与 Planner 已合并为统一 Agent（`prompts/system/unified-planner-orchestrator.md`）。接收用户消息后做四类决策：**自己直接回答** / **直接派发单 agent**（带 Task、Params）/ **复杂任务**（拆成多步，每步指定 Agent + Task + Params）/ **无法完成**（请用户澄清）。TUI 的 main 路由使用 `run_unified()` 执行该流程。
+- **派发**：`WorkflowOrchestrator.run_unified()`（统一四类决策）、`_analyze_intent()` + `dispatch()`（路由为 dispatch 时）、`dispatch_async()` / `dispatch_parallel_async()`。
 - **并行**：支持多 Agent 并发（如 `dispatch_parallel_async`）及工具级 DAG（`{{call_id.output.field}}`），详见 `docs/agent-mailbox-schema.md`。
 - **安全**：ToolFilter 控制工具权限；Bash 使用 BashRestrictedFilter（白名单/黑名单/确认）。
 

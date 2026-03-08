@@ -601,6 +601,61 @@ class MiniCoderConsole:
         parts.append(f"[{_color(sec)}]{text}[/{_color(sec)}]")
         return "，".join(parts)
 
+    def _call_unified_and_display(
+        self,
+        user_input: str,
+    ) -> Tuple[bool, Optional[float], Optional[float], bool]:
+        """统一 Planner-Orchestrator：先由统一 Agent 做四类决策，再执行并展示结果。
+
+        四类决策：直接回答 / 直接派发单 agent / 复杂任务多步派发 / 无法完成请用户澄清。
+        Returns:
+            (是否成功, 本次总耗时秒数, 首字耗时, 是否有输出内容)
+        """
+        if self._orchestrator is None:
+            return (False, None, None, False)
+        t_start = time.perf_counter()
+        t_first_token: Optional[float] = None
+        had_streaming = False
+
+        def stream_callback(content: str) -> None:
+            nonlocal t_first_token, had_streaming
+            if t_first_token is None:
+                t_first_token = time.perf_counter()
+            had_streaming = True
+            self._console.print(content, end="")
+            if getattr(self._console, "file", None) is not None:
+                self._console.file.flush()
+
+        try:
+            context: Optional[Dict[str, Any]] = None
+            if self._orchestrator._context is not None:
+                wd = self._orchestrator._context.blackboard.get_context("work_dir")
+                if wd is not None:
+                    context = {"work_dir": str(wd)}
+            result = self._orchestrator.run_unified(
+                user_input,
+                context=context,
+                stream_callback=stream_callback,
+            )
+        except Exception as e:
+            logging.exception("Unified run failed: %s", e)
+            duration_sec = time.perf_counter() - t_start
+            self._console.print(f"[red]统一 Agent 执行失败: {e}[/red]")
+            return (False, duration_sec, None, False)
+        duration_sec = time.perf_counter() - t_start
+        ok = getattr(result, "success", False)
+        output = getattr(result, "output", "") or ""
+        error = getattr(result, "error", "") or ""
+        if had_streaming:
+            self._console.print()
+        elif output:
+            self._console.print(Markdown(output))
+        if not ok and error:
+            self._console.print(Panel(f"[red]{error}[/red]", title="错误", border_style="red"))
+        duration_to_first = (t_first_token - t_start) if t_first_token is not None else None
+        had_output = had_streaming or bool(output.strip())
+        return (ok, duration_sec, duration_to_first, had_output)
+
     def _call_orchestrator_dispatch_and_display(
         self,
         user_input: str,
@@ -1320,27 +1375,28 @@ class MiniCoderConsole:
                     route,
                 )
 
+                use_orchestrator = self._ensure_orchestrator()
+                self._set_orchestrator_work_dir()
                 if route == "main":
+                    # 统一 Planner-Orchestrator：四类决策（直接回答/直接派发/复杂任务多步/无法完成），由 run_unified 执行
+                    ok, duration_sec, duration_to_first_sec, had_output = self._call_unified_and_display(
+                        user_input
+                    )
+                elif not use_orchestrator:
                     ok, duration_sec, duration_to_first_sec = self._call_llm_stream_and_display(
                         user_input
                     )
+                    had_output = True
+                elif route == "workflow":
+                    ok, duration_sec, duration_to_first_sec = self._call_orchestrator_workflow_and_display(
+                        user_input
+                    )
+                    had_output = True
                 else:
-                    use_orchestrator = self._ensure_orchestrator()
-                    # 派发前注入工作目录，供 Coder 等子代理使用真实路径（避免模型输出 /home/user/...）
-                    self._set_orchestrator_work_dir()
-                    if not use_orchestrator:
-                        ok, duration_sec, duration_to_first_sec = self._call_llm_stream_and_display(
-                            user_input
-                        )
-                    elif route == "workflow":
-                        ok, duration_sec, duration_to_first_sec = self._call_orchestrator_workflow_and_display(
-                            user_input
-                        )
-                    else:
-                        forced_agent = decision.get("agent")
-                        ok, duration_sec, duration_to_first_sec, had_output = self._call_orchestrator_dispatch_and_display(
-                            user_input, forced_agent=forced_agent, route_decision=decision
-                        )
+                    forced_agent = decision.get("agent")
+                    ok, duration_sec, duration_to_first_sec, had_output = self._call_orchestrator_dispatch_and_display(
+                        user_input, forced_agent=forced_agent, route_decision=decision
+                    )
                 self._console.print()
                 if not ok and not had_output:
                     self._console.print(

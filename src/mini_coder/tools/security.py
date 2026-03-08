@@ -124,6 +124,11 @@ class SecurityLevel:
         "sed", "awk",
     ])
 
+    # 工作目录内允许的文件操作（首词）：当 cwd 在 allowed_paths 内且命令不逃逸到父目录/绝对路径时放行
+    WORK_DIR_FILE_OPS: FrozenSet[str] = frozenset([
+        "rm", "rmdir", "touch", "mkdir", "cp", "mv", "ln",
+    ])
+
     # 危险关键词 (在命令字符串中检测)
     DANGEROUS_KEYWORDS: FrozenSet[str] = frozenset([
         # Shell 操作符
@@ -140,6 +145,46 @@ class SecurityLevel:
         # 其他
         "eval", "exec", "source",
     ])
+
+    def is_work_dir_safe_command(self, command: str) -> bool:
+        """判断是否为「仅在工作目录内」的文件操作，用于在 cwd 在 allowed_paths 时放行读写删。
+
+        条件：首词为 rm/rmdir/touch/mkdir/cp/mv/ln，且命令中不包含父目录或绝对路径（不逃逸工作目录）。
+        """
+        if not command or not command.strip():
+            return False
+        first = command.strip().split(maxsplit=1)[0].lower()
+        if first not in self.WORK_DIR_FILE_OPS:
+            return False
+        # 禁止逃逸到父目录或绝对路径
+        if " .." in command or " /" in command or command.strip().startswith("/"):
+            return False
+        return True
+
+    def is_work_dir_safe_readonly_pipeline(self, command: str) -> bool:
+        """判断是否为「工作目录内仅读」的 find+cat 类管道/exec，用于支持「读取所有文件（含递归）」等模糊请求。
+
+        放行：find 开头的命令，且为 -exec cat 或 | xargs cat/head 等只读组合，且不含写/删动词。
+        """
+        if not command or not command.strip():
+            return False
+        c = command.strip()
+        if not c.lower().startswith("find "):
+            return False
+        # 禁止写/删
+        for w in (" rm ", " mv ", " chmod", " >", ">>", "rm ", "mv "):
+            if w in c or c.startswith(w.strip()):
+                return False
+        # 只读模式之一：find ... -exec cat {} \;
+        if " -exec " in c and " cat " in c and " {} " in c:
+            return True
+        # 只读模式之二：find ... | xargs cat 或 xargs head
+        if " | " in c and "xargs" in c and ("cat" in c or "head" in c):
+            return True
+        # 仅 find 列举（无 -exec 无管道）也视为只读，如 find . -type f
+        if " -exec " not in c and " | " not in c:
+            return True
+        return False
 
     def is_banned(self, command: str) -> bool:
         """检查命令是否在黑名单中

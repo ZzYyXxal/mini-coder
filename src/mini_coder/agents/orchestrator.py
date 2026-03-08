@@ -66,6 +66,7 @@ from typing import Dict, List, Optional, Any, Callable
 
 from mini_coder.agents.enhanced import (
     Blackboard,
+    BlackboardArtifact,
     Event,
     EventType,
     BaseEnhancedAgent,
@@ -92,9 +93,18 @@ from mini_coder.agents.mailbox import (
 )
 
 from mini_coder.agents.scheduler import ParallelScheduler
+from mini_coder.agents.output_parser import (
+    parse_unified_output,
+    UnifiedOutputType,
+    UnifiedOutput,
+)
+from mini_coder.agents.prompt_loader import PromptLoader
 from mini_coder.tools.filter import BashRestrictedFilter
 from mini_coder.tools.command import CommandTool
 from mini_coder.tools.security import SecurityMode
+
+# Debug logging for context passing diagnostics
+from mini_coder.utils.debug_logger import get_debug_logger, enable_debug_logging
 
 logger = logging.getLogger(__name__)
 
@@ -312,6 +322,10 @@ class WorkflowOrchestrator:
         self.llm_service = llm_service
         self.config = config or WorkflowConfig()
         self.command_executor = command_executor
+        # 每 agent 独立记忆注册表（仅部分 agent 使用 NoteTool）
+        self._agent_memory_registry = getattr(
+            llm_service, "get_agent_memory_registry", lambda: None
+        )()
 
         # 当前上下文
         self._context: Optional[WorkflowContext] = None
@@ -767,26 +781,46 @@ Respond with only one word: EXPLORER, PLANNER, CODER, REVIEWER, BASH, GENERAL_PU
         )
 
         blackboard = self._context.blackboard if self._context else Blackboard("dispatch")
+        dbg = get_debug_logger()
 
         # 创建 Agent 事件回调（用于转发工具调用事件到 TUI）
         agent_event_callback = self._create_agent_event_callback(agent_type)
 
+        # Debug: log blackboard state before creating agent
+        dbg.log_blackboard_state(
+            source=f"_create_subagent_{agent_type.value}",
+            blackboard_id=getattr(blackboard, 'task_id', None),
+            context_keys=list(blackboard._context.keys()) if hasattr(blackboard, '_context') else [],
+            artifact_names=[a.name for a in blackboard.list_artifacts()] if hasattr(blackboard, 'list_artifacts') else [],
+            work_dir=blackboard.get_context("work_dir") if hasattr(blackboard, 'get_context') else None,
+        )
+
         if agent_type == SubAgentType.EXPLORER:
-            return ExplorerAgent(self.llm_service)
+            agent = ExplorerAgent(self.llm_service)
+            dbg.log_agent_created(agent_type.value, "ExplorerAgent", has_blackboard=False)
+            return agent
         elif agent_type == SubAgentType.PLANNER:
-            return PlannerAgent(
+            agent = PlannerAgent(
                 self.llm_service,
                 blackboard=blackboard,
                 event_callback=agent_event_callback,
             )
+            dbg.log_agent_created(agent_type.value, "PlannerAgent", has_blackboard=True, blackboard_id=getattr(blackboard, 'task_id', None))
+            return agent
         elif agent_type == SubAgentType.CODER:
-            return CoderAgent(
+            agent = CoderAgent(
                 self.llm_service,
                 blackboard=blackboard,
                 event_callback=agent_event_callback,
             )
+            dbg.log_agent_created(agent_type.value, "CoderAgent", has_blackboard=True, blackboard_id=getattr(blackboard, 'task_id', None))
+            return agent
         elif agent_type == SubAgentType.REVIEWER:
-            return ReviewerAgent(self.llm_service)
+            # BUG FIX: ReviewerAgent needs blackboard to access code artifacts!
+            # Currently it only gets context via dispatch_context, not via blackboard
+            agent = ReviewerAgent(self.llm_service)
+            dbg.log_agent_created(agent_type.value, "ReviewerAgent", has_blackboard=False)
+            return agent
         elif agent_type == SubAgentType.BASH:
             work_dir = None
             if self._context is not None:
@@ -802,7 +836,7 @@ Respond with only one word: EXPLORER, PLANNER, CODER, REVIEWER, BASH, GENERAL_PU
                         "max_output_length": 30000,
                     },
                 )
-            return BashAgent(
+            agent = BashAgent(
                 self.llm_service,
                 config=AgentConfig(
                     name="BashAgent",
@@ -814,10 +848,16 @@ Respond with only one word: EXPLORER, PLANNER, CODER, REVIEWER, BASH, GENERAL_PU
                 command_tool=command_tool,
                 work_dir=work_dir or None,
             )
+            dbg.log_agent_created(agent_type.value, "BashAgent", has_blackboard=False, work_dir=work_dir or None)
+            return agent
         elif agent_type == SubAgentType.GENERAL_PURPOSE:
-            return GeneralPurposeAgent(self.llm_service)
+            agent = GeneralPurposeAgent(self.llm_service)
+            dbg.log_agent_created(agent_type.value, "GeneralPurposeAgent", has_blackboard=False)
+            return agent
         elif agent_type == SubAgentType.MINI_CODER_GUIDE:
-            return MiniCoderGuideAgent(self.llm_service)
+            agent = MiniCoderGuideAgent(self.llm_service)
+            dbg.log_agent_created(agent_type.value, "MiniCoderGuideAgent", has_blackboard=False)
+            return agent
         else:
             raise ValueError(f"Unknown agent type: {agent_type}")
 
@@ -858,6 +898,15 @@ Respond with only one word: EXPLORER, PLANNER, CODER, REVIEWER, BASH, GENERAL_PU
         agent_type = self._analyze_intent(intent)
         logger.info(f"Dispatching to {agent_type.value}")
 
+        dbg = get_debug_logger()
+        dbg.log_dispatch_start(
+            intent=intent,
+            agent_type=agent_type.value,
+            context_keys=list(context.keys()) if context else [],
+            has_blackboard=self._context is not None,
+            blackboard_id=getattr(self._context.blackboard, 'task_id', None) if self._context else None,
+        )
+
         # 记录交互式上下文（若存在），便于子代理共享
         if self._context is not None:
             self._context.blackboard.set_context("last_user_input", intent)
@@ -870,24 +919,241 @@ Respond with only one word: EXPLORER, PLANNER, CODER, REVIEWER, BASH, GENERAL_PU
         # 3. 创建子代理
         agent = self._create_subagent(agent_type)
 
-        # 4. 执行任务（base 系 agent 需传入含 work_dir 的 context；stream_callback 用于 TUI 流式输出与首字耗时）
-        if isinstance(agent, BaseEnhancedAgent):
-            result = agent.execute(intent, stream_callback=stream_callback)
+        # 统一构建 dispatch_context（含 work_dir、bash_mode、reviewer 注入、每 agent 独立记忆上下文）
+        dispatch_context = dict(context or {})
+        if self._context is not None:
+            wd = self._context.blackboard.get_context("work_dir")
+            if wd is not None:
+                dispatch_context["work_dir"] = str(wd)
+            else:
+                dbg._write_log("dispatch_work_dir_missing", {
+                    "reason": "work_dir not set in blackboard",
+                    "blackboard_context_keys": list(self._context.blackboard._context.keys()) if hasattr(self._context.blackboard, '_context') else [],
+                })
         else:
-            dispatch_context = dict(context or {})
-            if self._context is not None:
-                wd = self._context.blackboard.get_context("work_dir")
-                if wd is not None:
-                    dispatch_context["work_dir"] = str(wd)
-            # 派发 BASH 时若调用方未传 bash_mode，由 Orchestrator 根据 intent 推断（质量流水线由调用方/Orchestrator 决策触发）
-            if agent_type == SubAgentType.BASH and "bash_mode" not in dispatch_context:
-                dispatch_context["bash_mode"] = self._infer_bash_mode(intent)
+            dbg._write_log("dispatch_no_context", {
+                "reason": "self._context is None, cannot get work_dir"
+            })
+        if agent_type == SubAgentType.BASH and "bash_mode" not in dispatch_context:
+            dispatch_context["bash_mode"] = self._infer_bash_mode(intent)
+        if agent_type == SubAgentType.REVIEWER:
+            self._inject_reviewer_context(dispatch_context)
+        # 每 agent 独立记忆：pre_step 加载该 agent 的历史，注入到 memory_context
+        hook = None
+        if self._agent_memory_registry:
+            hook = self._agent_memory_registry.get_hook(agent_type.value)
+            if hook:
+                dispatch_context["memory_context"] = hook.pre_step(
+                    max_tokens=8000,
+                    current_messages=None,
+                    dedupe=False,
+                    run_compression_first=True,
+                )
+        if not dispatch_context.get("memory_context"):
+            dispatch_context["memory_context"] = []
+
+        dbg.log_dispatch_context(f"dispatch_execute_{agent_type.value}", dispatch_context)
+
+        # 4. 执行任务（base 系与 enhanced 均传入 dispatch_context，便于使用 memory_context）
+        if isinstance(agent, BaseEnhancedAgent):
+            result = agent.execute(intent, stream_callback=stream_callback, context=dispatch_context)
+        else:
             result = agent.execute(intent, context=dispatch_context, stream_callback=stream_callback)
+
+        # 回写该 agent 的本轮对话到其独立记忆，并触发 post_step 压缩
+        if hook and self._agent_memory_registry:
+            manager = self._agent_memory_registry.get_manager(agent_type.value)
+            if manager and manager.is_enabled:
+                manager.add_message("user", intent)
+                manager.add_message("assistant", (getattr(result, "output", None) or "") or "")
+                hook.post_step()
+
+        dbg.log_agent_result(
+            agent_type=agent_type.value,
+            success=getattr(result, 'success', False),
+            output_len=len(getattr(result, 'output', '') or ''),
+            error=getattr(result, 'error', None),
+        )
 
         # 5. 发送 Agent 完成事件
         self._notify_agent_completed(agent_type, result)
 
         return result
+
+    def run_unified(
+        self,
+        user_message: str,
+        context: Optional[Dict[str, Any]] = None,
+        stream_callback: Optional[Any] = None,
+    ) -> EnhancedAgentResult:
+        """统一 Planner-Orchestrator：先由统一 Agent 做四类决策，再按解析结果执行。
+
+        四类决策：自己直接回答 / 直接派发单 agent / 复杂任务多步派发 / 无法完成请用户澄清。
+        替代原先「主代理只出文本 + 路由再 _analyze_intent 派发单 agent」的割裂流程，由统一 Agent 一次完成判断与规划。
+        """
+        if self.llm_service is None:
+            return EnhancedAgentResult(
+                success=False,
+                output="",
+                error="LLM 服务不可用，无法执行统一 Agent",
+            )
+        dbg = get_debug_logger()
+        try:
+            loader = PromptLoader()
+            system_prompt = loader.load("unified-planner-orchestrator", context=context or {}, use_cache=True)
+        except Exception as e:
+            logger.warning("Failed to load unified prompt, using inline fallback: %s", e)
+            system_prompt = (
+                "You are the unified Planner-Orchestrator. Output exactly one of: "
+                "[Simple Answer], [Direct Dispatch], [Complex Task], [Cannot Handle]. "
+                "For Direct Dispatch use Agent: and Task:. For Complex Task use Steps: with 1. Agent: ... Task: ..."
+            )
+        try:
+            response = self.llm_service.chat_one_shot(system_prompt, user_message)
+        except Exception as e:
+            logger.exception("Unified Agent LLM call failed: %s", e)
+            return EnhancedAgentResult(success=False, output="", error=str(e))
+        if not (response or "").strip():
+            return EnhancedAgentResult(success=False, output="", error="统一 Agent 返回为空")
+        parsed = parse_unified_output(response)
+        dbg._write_log("run_unified_parsed", {
+            "output_type": parsed.output_type.value,
+            "has_direct_dispatch": parsed.direct_dispatch is not None,
+            "steps_count": len(parsed.steps) if parsed.steps else 0,
+        })
+
+        if parsed.output_type == UnifiedOutputType.SIMPLE_ANSWER or parsed.output_type == UnifiedOutputType.UNKNOWN:
+            content = (parsed.content or parsed.raw_text or "").strip()
+            return EnhancedAgentResult(success=True, output=content)
+
+        if parsed.output_type == UnifiedOutputType.CANNOT_HANDLE:
+            content = (parsed.content or parsed.raw_text or "").strip()
+            return EnhancedAgentResult(success=True, output=content)
+
+        if parsed.output_type == UnifiedOutputType.DIRECT_DISPATCH and parsed.direct_dispatch:
+            dd = parsed.direct_dispatch
+            try:
+                agent_type = SubAgentType[dd.agent]
+            except KeyError:
+                logger.warning("Unified Agent returned unknown agent name: %s", dd.agent)
+                return EnhancedAgentResult(
+                    success=False,
+                    output="",
+                    error=f"未知子代理名称: {dd.agent}",
+                )
+            dispatch_ctx = dict(context or {})
+            dispatch_ctx.update(dd.params)
+            return self.dispatch_with_agent(
+                agent_type,
+                dd.task,
+                context=dispatch_ctx,
+                stream_callback=stream_callback,
+            )
+
+        if parsed.output_type == UnifiedOutputType.COMPLEX_TASK and parsed.steps:
+            outputs: List[str] = []
+            if parsed.problem_type:
+                outputs.append(f"**Problem type**: {parsed.problem_type}")
+            if parsed.implementation_plan:
+                outputs.append(parsed.implementation_plan)
+            if self._context and parsed.implementation_plan:
+                self._context.blackboard.put_artifact(
+                    BlackboardArtifact(
+                        name="implementation_plan.md",
+                        content_type="plan",
+                        content=parsed.implementation_plan,
+                        created_by="unified_planner",
+                    )
+                )
+            for i, step in enumerate(parsed.steps, 1):
+                try:
+                    agent_type = SubAgentType[step.agent]
+                except KeyError:
+                    outputs.append(f"[Step {i}] 未知 Agent: {step.agent}")
+                    continue
+                step_ctx = dict(context or {})
+                step_ctx.update(step.params)
+                self._notify_agent_started(agent_type)
+                result = self.dispatch_with_agent(
+                    agent_type,
+                    step.task,
+                    context=step_ctx,
+                    stream_callback=stream_callback,
+                )
+                self._notify_agent_completed(agent_type, result)
+                out = getattr(result, "output", "") or ""
+                err = getattr(result, "error", "") or ""
+                if out:
+                    outputs.append(f"**Step {i} ({step.agent})**:\n{out}")
+                if err:
+                    outputs.append(f"**Step {i} 错误**: {err}")
+            return EnhancedAgentResult(
+                success=True,
+                output="\n\n".join(outputs),
+            )
+
+        return EnhancedAgentResult(
+            success=True,
+            output=(parsed.content or parsed.raw_text or response or "").strip(),
+        )
+
+    def _inject_reviewer_context(self, dispatch_context: Dict[str, Any]) -> None:
+        """从 blackboard 注入 implementation_plan 与 code 工件到 dispatch_context，供 base.ReviewerAgent 使用。
+
+        TUI 下用户先让 Coder 生成代码、再让 Reviewer 评审时，Coder 已将结果写入 blackboard；
+        此处注入后 Reviewer 即可获得「刚才生成的代码」与计划，避免「无法评审」。
+        """
+        dbg = get_debug_logger()
+
+        if self._context is None:
+            dbg.log_dispatch_context("inject_reviewer_context_SKIP", {"reason": "self._context is None"})
+            return
+        bb = self._context.blackboard
+
+        # Debug: log blackboard state before injection
+        dbg.log_blackboard_state(
+            source="inject_reviewer_context_before",
+            blackboard_id=getattr(bb, 'task_id', None),
+            context_keys=list(bb._context.keys()) if hasattr(bb, '_context') else [],
+            artifact_names=[a.name for a in bb.list_artifacts()] if hasattr(bb, 'list_artifacts') else [],
+        )
+
+        if dispatch_context.get("plan") is None:
+            plan_content = bb.get_artifact_content("implementation_plan.md", "")
+            dispatch_context["plan"] = plan_content
+            dbg.log_blackboard_artifact(
+                source="inject_reviewer_context",
+                artifact_name="implementation_plan.md",
+                content_type="plan",
+                content_preview=plan_content[:300] if plan_content else "(empty)",
+                created_by="blackboard"
+            )
+
+        if dispatch_context.get("code") is None:
+            code_artifacts = bb.list_artifacts(content_type="code")
+            if code_artifacts:
+                code_parts = []
+                for a in code_artifacts:
+                    name = a.name.replace("code:", "").strip()
+                    content = (a.content or "")[:8000]
+                    code_parts.append(f"### {name}\n```\n{content}\n```")
+                    dbg.log_blackboard_artifact(
+                        source="inject_reviewer_context",
+                        artifact_name=a.name,
+                        content_type="code",
+                        content_preview=content[:300] if content else "(empty)",
+                        created_by=a.created_by
+                    )
+                dispatch_context["code"] = "\n\n".join(code_parts)
+            else:
+                dispatch_context["code"] = dispatch_context.get("code", "")
+                dbg._write_log("inject_reviewer_context_NO_CODE", {
+                    "reason": "No code artifacts in blackboard",
+                    "existing_code": dispatch_context.get("code", "")[:200]
+                })
+
+        # Debug: log final dispatch_context
+        dbg.log_dispatch_context("inject_reviewer_context_final", dispatch_context)
 
     def dispatch_with_agent(
         self,
@@ -907,17 +1173,34 @@ Respond with only one word: EXPLORER, PLANNER, CODER, REVIEWER, BASH, GENERAL_PU
                 self._context.blackboard.set_context("last_dispatch_context", context)
         self._notify_agent_started(agent_type)
         agent = self._create_subagent(agent_type)
+        dispatch_context = dict(context or {})
+        if self._context is not None:
+            wd = self._context.blackboard.get_context("work_dir")
+            if wd is not None:
+                dispatch_context["work_dir"] = str(wd)
+        if agent_type == SubAgentType.BASH and "bash_mode" not in dispatch_context:
+            dispatch_context["bash_mode"] = self._infer_bash_mode(intent)
+        if agent_type == SubAgentType.REVIEWER:
+            self._inject_reviewer_context(dispatch_context)
+        hook = None
+        if self._agent_memory_registry:
+            hook = self._agent_memory_registry.get_hook(agent_type.value)
+            if hook:
+                dispatch_context["memory_context"] = hook.pre_step(
+                    max_tokens=8000, current_messages=None, dedupe=False, run_compression_first=True
+                )
+        if not dispatch_context.get("memory_context"):
+            dispatch_context["memory_context"] = []
         if isinstance(agent, BaseEnhancedAgent):
-            result = agent.execute(intent, stream_callback=stream_callback)
+            result = agent.execute(intent, stream_callback=stream_callback, context=dispatch_context)
         else:
-            dispatch_context = dict(context or {})
-            if self._context is not None:
-                wd = self._context.blackboard.get_context("work_dir")
-                if wd is not None:
-                    dispatch_context["work_dir"] = str(wd)
-            if agent_type == SubAgentType.BASH and "bash_mode" not in dispatch_context:
-                dispatch_context["bash_mode"] = self._infer_bash_mode(intent)
             result = agent.execute(intent, context=dispatch_context, stream_callback=stream_callback)
+        if hook and self._agent_memory_registry:
+            manager = self._agent_memory_registry.get_manager(agent_type.value)
+            if manager and manager.is_enabled:
+                manager.add_message("user", intent)
+                manager.add_message("assistant", (getattr(result, "output", None) or "") or "")
+                hook.post_step()
         self._notify_agent_completed(agent_type, result)
         return result
 

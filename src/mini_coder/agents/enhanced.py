@@ -54,13 +54,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Any, Callable, Set
 import hashlib
 
-from mini_coder.agents.mailbox import (
-    MailboxMessage,
-    SubagentResult,
-    TaskBrief,
-    MESSAGE_TYPE_TASK,
-    MESSAGE_TYPE_RESULT,
-)
+# TaskBrief / SubagentResult 仅由 Scheduler、Orchestrator 使用；Agent 间数据通过 dispatch_context 显式传递，不再经 Blackboard Mailbox
 
 logger = logging.getLogger(__name__)
 
@@ -121,14 +115,41 @@ class BlackboardArtifact:
     metadata: Dict[str, Any] = field(default_factory=dict)
 
 
-class Blackboard:
-    """共享黑板 - Agent 间共享上下文和工件
+@dataclass
+class StepProgress:
+    """步骤进度追踪
 
-    参考黑板架构模式，提供：
-    1. 共享上下文存储
-    2. 工件管理（版本控制）
-    3. 事件发布/订阅
-    4. 访问控制
+    用于追踪 implementation_plan 中的步骤执行状态。
+    """
+    step_id: str                          # 步骤 ID，如 "1.1", "1.2"
+    description: str                      # 步骤描述
+    status: str = "pending"               # "pending" | "in_progress" | "completed" | "failed"
+    agent: str = ""                       # 负责执行的 Agent
+    started_at: Optional[float] = None    # 开始时间
+    completed_at: Optional[float] = None  # 完成时间
+    output_summary: str = ""              # 输出摘要
+    error: str = ""                       # 错误信息（如有）
+
+
+@dataclass
+class FileChangeRecord:
+    """文件变更记录"""
+    path: str                             # 文件路径
+    action: str                           # "created" | "modified" | "deleted"
+    by: str                               # 执行的 Agent
+    at: float = field(default_factory=time.time)  # 变更时间
+    summary: str = ""                     # 变更摘要
+
+
+class Blackboard:
+    """共享黑板 - 仅承载工作流/会话级的上下文与工件，与 LangGraph 的显式状态传递一致。
+
+    职责：
+    1. 共享上下文（work_dir、requirement、task_id 等）— 由 Orchestrator 写入，子 Agent 通过 dispatch_context 注入获取。
+    2. 工件存储（implementation_plan.md、code:*）— Planner/Coder 写入，Reviewer 等由 Orchestrator 通过 _inject_reviewer_context 注入到 dispatch_context。
+    3. 事件日志（可选，用于调试）。
+
+    不再使用 Mailbox 机制：Agent 间应传递的消息由 Orchestrator 在调用 agent.execute(task, context=...) 时通过 context 显式传入，避免“该传的没传、不该共享的乱共享”。
     """
 
     def __init__(self, task_id: str) -> None:
@@ -144,50 +165,12 @@ class Blackboard:
         self._subscribers: Dict[EventType, List[Callable]] = {
             event: [] for event in EventType
         }
-        # Mailbox：定向消息，主/子 Agent 只共享关键信息（见 docs/agent-mailbox-schema.md）
-        self._mailbox: List[MailboxMessage] = []
 
-    # --- Mailbox（定向投递，结构化回传）---
-
-    def post_message(self, msg: MailboxMessage) -> str:
-        """投递一条消息到 mailbox；返回 message_id。"""
-        self._mailbox.append(msg)
-        logger.debug("Mailbox post: %s -> %s type=%s", msg.from_agent, msg.to_agent, msg.type)
-        return msg.message_id
-
-    def collect_messages(
-        self,
-        for_agent: str,
-        type_filter: Optional[str] = None,
-    ) -> List[MailboxMessage]:
-        """收取发给指定 agent 的消息；可选按 type 过滤。"""
-        out = [m for m in self._mailbox if m.to_agent == for_agent]
-        if type_filter is not None:
-            out = [m for m in out if m.type == type_filter]
-        return out
-
-    def post_result(self, result: SubagentResult) -> str:
-        """子代理回传结构化结果给 main。"""
-        msg = MailboxMessage.create_result(result)
-        return self.post_message(msg)
-
-    def collect_results(self, for_agent: str = "main") -> List[SubagentResult]:
-        """收取发给 main 的 result 消息并解析为 SubagentResult 列表。"""
-        msgs = self.collect_messages(for_agent, type_filter=MESSAGE_TYPE_RESULT)
-        results = []
-        for m in msgs:
-            r = m.get_subagent_result()
-            if r is not None:
-                results.append(r)
-        return results
-
-    def get_latest_task_brief(self, for_agent: str) -> Optional[TaskBrief]:
-        """取发给指定子代理的最近一条 task 消息的 TaskBrief；若无则返回 None。"""
-        tasks = self.collect_messages(for_agent, type_filter=MESSAGE_TYPE_TASK)
-        if not tasks:
-            return None
-        latest = max(tasks, key=lambda m: m.created_at)
-        return latest.get_task_brief()
+        # === 进度追踪（新增） ===
+        self._step_progress: Dict[str, StepProgress] = {}      # 步骤进度 {step_id: StepProgress}
+        self._file_changes: List[FileChangeRecord] = []        # 文件变更记录
+        self._current_phase: str = ""                          # 当前阶段（如 "planning", "implementing"）
+        self._error_history: List[Dict[str, Any]] = []         # 错误历史（用于失败恢复）
 
     # --- Artifact Management ---
 
@@ -231,16 +214,63 @@ class Blackboard:
         self._artifacts[name] = artifact
 
         logger.debug(f"Added artifact: {name} (id={artifact_id})")
+
+        # Debug logging
+        from mini_coder.utils.debug_logger import get_debug_logger
+        try:
+            dbg = get_debug_logger()
+            dbg._write_log("blackboard_add_artifact", {
+                "blackboard_id": self.task_id,
+                "artifact_id": artifact_id,
+                "artifact_name": name,
+                "content_type": content_type,
+                "content_len": len(content) if content else 0,
+                "created_by": created_by,
+                "total_artifacts": len(self._artifacts),
+            })
+        except Exception:
+            pass
+
         return artifact_id
 
     def get_artifact(self, name_or_id: str) -> Optional[BlackboardArtifact]:
         """获取工件"""
-        return self._artifacts.get(name_or_id)
+        artifact = self._artifacts.get(name_or_id)
+
+        # Debug logging
+        from mini_coder.utils.debug_logger import get_debug_logger
+        try:
+            dbg = get_debug_logger()
+            dbg._write_log("blackboard_get_artifact", {
+                "blackboard_id": self.task_id,
+                "name_or_id": name_or_id,
+                "found": artifact is not None,
+                "artifact_name": artifact.name if artifact else None,
+            })
+        except Exception:
+            pass
+
+        return artifact
 
     def get_artifact_content(self, name_or_id: str, default: Any = None) -> Any:
         """获取工件内容"""
         artifact = self.get_artifact(name_or_id)
-        return artifact.content if artifact else default
+        content = artifact.content if artifact else default
+
+        # Debug logging
+        from mini_coder.utils.debug_logger import get_debug_logger
+        try:
+            dbg = get_debug_logger()
+            dbg._write_log("blackboard_get_artifact_content", {
+                "blackboard_id": self.task_id,
+                "name_or_id": name_or_id,
+                "found": artifact is not None,
+                "content_len": len(content) if content else 0,
+            })
+        except Exception:
+            pass
+
+        return content
 
     def list_artifacts(
         self,
@@ -254,6 +284,20 @@ class Blackboard:
             artifacts = [a for a in artifacts if a.content_type == content_type]
         if created_by:
             artifacts = [a for a in artifacts if a.created_by == created_by]
+
+        # Debug logging
+        from mini_coder.utils.debug_logger import get_debug_logger
+        try:
+            dbg = get_debug_logger()
+            dbg._write_log("blackboard_list_artifacts", {
+                "blackboard_id": self.task_id,
+                "filter_content_type": content_type,
+                "filter_created_by": created_by,
+                "result_count": len(artifacts),
+                "result_names": [a.name for a in artifacts[:10]],  # 限制输出
+            })
+        except Exception:
+            pass
 
         return artifacts
 
@@ -313,8 +357,173 @@ class Blackboard:
             "artifact_count": len(self._artifacts),
             "context_keys": list(self._context.keys()),
             "event_count": len(self._event_log),
-            "mailbox_count": len(self._mailbox),
+            "progress": self.get_progress_summary(),
         }
+
+    # === 进度追踪方法（新增） ===
+
+    def init_steps_from_plan(self, plan_content: str) -> None:
+        """从 implementation_plan 初始化步骤进度
+
+        解析 implementation_plan.md 中的阶段拆解，提取步骤并初始化进度追踪。
+
+        Args:
+            plan_content: implementation_plan.md 的内容
+        """
+        import re
+        # 匹配 "- [ ] Step N.M <description>" 格式
+        pattern = r'-\s*\[\s*\]\s*Step\s+(\d+\.\d+)\s+(.+)'
+        for match in re.finditer(pattern, plan_content):
+            step_id = match.group(1)
+            description = match.group(2).strip()
+            self._step_progress[step_id] = StepProgress(
+                step_id=step_id,
+                description=description,
+                status="pending"
+            )
+        logger.debug(f"Initialized {len(self._step_progress)} steps from plan")
+
+    def mark_step_started(self, step_id: str, agent: str) -> None:
+        """标记步骤开始执行
+
+        Args:
+            step_id: 步骤 ID（如 "1.1"）
+            agent: 执行该步骤的 Agent 名称
+        """
+        if step_id not in self._step_progress:
+            self._step_progress[step_id] = StepProgress(
+                step_id=step_id,
+                description="",
+                status="in_progress",
+                agent=agent,
+                started_at=time.time()
+            )
+        else:
+            self._step_progress[step_id].status = "in_progress"
+            self._step_progress[step_id].agent = agent
+            self._step_progress[step_id].started_at = time.time()
+        logger.debug(f"Step {step_id} started by {agent}")
+
+    def mark_step_completed(self, step_id: str, output_summary: str = "") -> None:
+        """标记步骤完成
+
+        Args:
+            step_id: 步骤 ID
+            output_summary: 输出摘要（可选）
+        """
+        if step_id in self._step_progress:
+            self._step_progress[step_id].status = "completed"
+            self._step_progress[step_id].completed_at = time.time()
+            if output_summary:
+                self._step_progress[step_id].output_summary = output_summary
+            logger.debug(f"Step {step_id} completed")
+
+    def mark_step_failed(self, step_id: str, error: str) -> None:
+        """标记步骤失败
+
+        Args:
+            step_id: 步骤 ID
+            error: 错误信息
+        """
+        if step_id in self._step_progress:
+            self._step_progress[step_id].status = "failed"
+            self._step_progress[step_id].error = error
+            self._step_progress[step_id].completed_at = time.time()
+        logger.warning(f"Step {step_id} failed: {error}")
+
+    def record_file_change(self, path: str, action: str, by: str, summary: str = "") -> None:
+        """记录文件变更
+
+        Args:
+            path: 文件路径
+            action: 变更类型 ("created" | "modified" | "deleted")
+            by: 执行变更的 Agent
+            summary: 变更摘要
+        """
+        self._file_changes.append(FileChangeRecord(
+            path=path,
+            action=action,
+            by=by,
+            summary=summary
+        ))
+        logger.debug(f"File {action}: {path} by {by}")
+
+    def get_progress_summary(self) -> Dict[str, Any]:
+        """获取进度摘要
+
+        Returns:
+            包含总步骤数、完成数、进度百分比、当前步骤、文件变更等信息
+        """
+        total = len(self._step_progress)
+        completed = sum(1 for s in self._step_progress.values() if s.status == "completed")
+        in_progress = [s.step_id for s in self._step_progress.values() if s.status == "in_progress"]
+        failed = [s.step_id for s in self._step_progress.values() if s.status == "failed"]
+
+        created_files = [f.path for f in self._file_changes if f.action == "created"]
+        modified_files = [f.path for f in self._file_changes if f.action == "modified"]
+
+        return {
+            "total_steps": total,
+            "completed_steps": completed,
+            "in_progress_steps": in_progress,
+            "failed_steps": failed,
+            "progress_percent": round(completed / total * 100, 1) if total > 0 else 0,
+            "current_phase": self._current_phase,
+            "file_changes": {
+                "created": created_files,
+                "modified": modified_files,
+                "total_created": len(created_files),
+                "total_modified": len(modified_files),
+            },
+        }
+
+    def get_formatted_progress(self) -> str:
+        """获取格式化的进度报告（供统一 Agent 或用户查询使用）
+
+        Returns:
+            可读的进度报告字符串
+        """
+        summary = self.get_progress_summary()
+        lines = [
+            f"**项目进度**: {summary['completed_steps']}/{summary['total_steps']} 步骤完成 ({summary['progress_percent']}%)",
+        ]
+
+        if summary["in_progress_steps"]:
+            lines.append(f"**当前执行**: 步骤 {', '.join(summary['in_progress_steps'])}")
+
+        if summary["failed_steps"]:
+            lines.append(f"**失败步骤**: {', '.join(summary['failed_steps'])}")
+
+        fc = summary["file_changes"]
+        if fc["total_created"] > 0 or fc["total_modified"] > 0:
+            lines.append(f"**文件变更**: 新增 {fc['total_created']} 个，修改 {fc['total_modified']} 个")
+
+        return "\n".join(lines)
+
+    def set_current_phase(self, phase: str) -> None:
+        """设置当前阶段
+
+        Args:
+            phase: 阶段名称（如 "planning", "implementing", "testing"）
+        """
+        self._current_phase = phase
+        logger.debug(f"Phase changed to: {phase}")
+
+    def record_error(self, error: str, agent: str, step_id: str = "") -> None:
+        """记录错误到错误历史
+
+        Args:
+            error: 错误信息
+            agent: 发生错误的 Agent
+            step_id: 相关步骤 ID（可选）
+        """
+        self._error_history.append({
+            "error": error,
+            "agent": agent,
+            "step_id": step_id,
+            "at": time.time(),
+        })
+        logger.warning(f"Error recorded: {error} (agent={agent}, step={step_id})")
 
 
 # ==================== Enhanced Agent Base ====================
@@ -471,13 +680,17 @@ class BaseEnhancedAgent(ABC):
 
     @abstractmethod
     def execute(
-        self, task: str, stream_callback: Optional[Callable[[str], None]] = None
+        self,
+        task: str,
+        stream_callback: Optional[Callable[[str], None]] = None,
+        context: Optional[Dict[str, Any]] = None,
     ) -> EnhancedAgentResult:
         """执行任务
 
         Args:
             task: 任务描述
             stream_callback: 可选，收到流式 delta 时调用，用于 TUI 逐字输出与首字耗时
+            context: 可选，派发上下文（含 memory_context 等），由 Orchestrator 注入
 
         Returns:
             EnhancedAgentResult: 执行结果
@@ -496,71 +709,6 @@ class BaseEnhancedAgent(ABC):
         # 默认实现：在线程池中执行同步方法
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, lambda: self.execute(task))
-
-    async def execute_from_mailbox(self) -> SubagentResult:
-        """从 Mailbox 获取任务并执行，结果回传到 Mailbox。
-
-        这是 Agent 的 Mailbox 协议入口：
-        1. 从 blackboard.get_latest_task_brief() 获取任务
-        2. 执行任务
-        3. 构造 SubagentResult 并 blackboard.post_result()
-
-        Returns:
-            SubagentResult: 结构化执行结果
-        """
-        task_brief = self.blackboard.get_latest_task_brief(self.AGENT_TYPE)
-        if not task_brief:
-            return SubagentResult(
-                task_id="",
-                from_agent=self.AGENT_TYPE,
-                success=False,
-                summary="No task found in mailbox",
-                error="No task brief available for this agent",
-            )
-
-        # 记录任务开始
-        logger.info(f"[{self.AGENT_TYPE}] Executing task: {task_brief.intent}")
-        self._set_state(EnhancedAgentState.EXECUTING)
-
-        try:
-            # 执行任务
-            result = await self.execute_async(task_brief.intent)
-
-            # 构造 SubagentResult
-            subagent_result = SubagentResult(
-                task_id=task_brief.task_id,
-                from_agent=self.AGENT_TYPE,
-                success=result.success,
-                summary=result.output[:200] if result.output else "Completed",
-                artifact_refs=list(result.artifacts.keys()) if result.artifacts else [],
-                error=result.error if not result.success else None,
-                metrics={
-                    "elapsed_time": result.elapsed_time,
-                    "iterations": result.iterations,
-                    "tokens_used": result.tokens_used,
-                },
-            )
-
-            # 回传结果到 Mailbox
-            self.blackboard.post_result(subagent_result)
-
-            self._set_state(EnhancedAgentState.IDLE)
-            return subagent_result
-
-        except Exception as e:
-            logger.exception(f"[{self.AGENT_TYPE}] Task execution failed: {e}")
-            self._set_state(EnhancedAgentState.ERROR)
-
-            error_result = SubagentResult(
-                task_id=task_brief.task_id,
-                from_agent=self.AGENT_TYPE,
-                success=False,
-                summary="Task execution failed",
-                error=str(e),
-            )
-
-            self.blackboard.post_result(error_result)
-            return error_result
 
     def _subscribe_to_events(self) -> None:
         """订阅事件"""
@@ -715,7 +863,10 @@ class ArchitecturalConsultantAgent(BaseEnhancedAgent):
         super().__init__(llm_service, blackboard, ArchitecturalConsultantCapabilities())
 
     def execute(
-        self, task: str, stream_callback: Optional[Callable[[str], None]] = None
+        self,
+        task: str,
+        stream_callback: Optional[Callable[[str], None]] = None,
+        context: Optional[Dict[str, Any]] = None,
     ) -> EnhancedAgentResult:
         """执行架构咨询任务"""
         self._start_time = time.time()
@@ -833,7 +984,10 @@ class CodeReviewerAgent(BaseEnhancedAgent):
         super().__init__(llm_service, blackboard, CodeReviewerCapabilities())
 
     def execute(
-        self, task: str, stream_callback: Optional[Callable[[str], None]] = None
+        self,
+        task: str,
+        stream_callback: Optional[Callable[[str], None]] = None,
+        context: Optional[Dict[str, Any]] = None,
     ) -> EnhancedAgentResult:
         """执行代码评审任务"""
         self._start_time = time.time()
@@ -986,19 +1140,23 @@ class PlannerAgent(BaseEnhancedAgent):
         super().__init__(llm_service, blackboard, PlannerCapabilities(), event_callback=event_callback)
 
     def execute(
-        self, task: str, stream_callback: Optional[Callable[[str], None]] = None
+        self,
+        task: str,
+        stream_callback: Optional[Callable[[str], None]] = None,
+        context: Optional[Dict[str, Any]] = None,
     ) -> EnhancedAgentResult:
         """执行规划任务"""
         self._start_time = time.time()
         self._set_state(EnhancedAgentState.THINKING)
+        dispatch_context = context  # 派发上下文（含 memory_context）
 
         try:
             # 1. 收集上下文
-            context = self._get_context_for_task(task)
+            task_context = self._get_context_for_task(task)
 
             # 2. 调用 LLM 进行规划
             self._set_state(EnhancedAgentState.EXECUTING)
-            prompt = self._build_planning_prompt(task, context)
+            prompt = self._build_planning_prompt(task, task_context, dispatch_context=dispatch_context)
             response = self.llm_service.chat(prompt)
 
             # 3. 解析并保存计划
@@ -1036,23 +1194,33 @@ class PlannerAgent(BaseEnhancedAgent):
     def _build_planning_prompt(
         self,
         task: str,
-        context: Dict
+        context: Dict,
+        dispatch_context: Optional[Dict[str, Any]] = None,
     ) -> str:
         """构建规划 prompt
 
         加载系统提示词并追加任务上下文；注入 work_dir 供 {{work_dir}} 占位符替换。
+        若有 dispatch_context.memory_context 则追加历史上下文。
         """
         work_dir = (self.blackboard.get_context("work_dir") or "").strip()
         prompt_context = {"work_dir": work_dir or "（未设置）"}
-        # 加载系统提示词（从 prompts/system/subagent-planner.md）
         system_prompt = self._load_system_prompt(context=prompt_context)
 
-        # 构建任务上下文
+        memory_blob = ""
+        if dispatch_context:
+            memory_context = dispatch_context.get("memory_context") or []
+            if memory_context:
+                parts = []
+                for m in memory_context[-8:]:
+                    role = m.get("role", "")
+                    content = (m.get("content") or "")[:1500]
+                    if content.strip():
+                        parts.append(f"[{role}]: {content}")
+                if parts:
+                    memory_blob = "\n\n## 历史上下文（本 agent 记忆）\n\n" + "\n\n".join(parts) + "\n\n---\n\n"
+
         task_context = f"""
-
----
-
-## 当前任务
+{memory_blob}## 当前任务
 
 任务: {task}
 
@@ -1108,10 +1276,16 @@ class CoderAgent(BaseEnhancedAgent):
     ) -> None:
         super().__init__(llm_service, blackboard, CoderCapabilities(), event_callback=event_callback)
 
-    def execute(self, task: str, stream_callback: Optional[Callable[[str], None]] = None) -> EnhancedAgentResult:
+    def execute(
+        self,
+        task: str,
+        stream_callback: Optional[Callable[[str], None]] = None,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> EnhancedAgentResult:
         """执行编码任务；支持 stream_callback 时流式输出。"""
         self._start_time = time.time()
         self._set_state(EnhancedAgentState.THINKING)
+        dispatch_context = context
 
         try:
             # 1. 获取计划
@@ -1123,8 +1297,10 @@ class CoderAgent(BaseEnhancedAgent):
             # 2. 获取现有代码（如果有重试）
             existing_code = self._get_existing_code()
 
-            # 3. 构建编码 prompt（system + user 用于流式 one-shot）
-            system_prompt, task_context = self._build_coding_prompt(task, plan, existing_code)
+            # 3. 构建编码 prompt（system + user 用于流式 one-shot；可含 memory_context）
+            system_prompt, task_context = self._build_coding_prompt(
+                task, plan, existing_code, dispatch_context=dispatch_context
+            )
 
             # 4. 调用 LLM（流式或非流式）
             self._set_state(EnhancedAgentState.EXECUTING)
@@ -1141,6 +1317,16 @@ class CoderAgent(BaseEnhancedAgent):
 
             # 5. 解析并保存代码
             code_files = self._parse_code(response)
+
+            # Debug logging for code artifact storage
+            from mini_coder.utils.debug_logger import get_debug_logger
+            dbg = get_debug_logger()
+            dbg._write_log("coder_saving_artifacts", {
+                "files_count": len(code_files),
+                "filenames": list(code_files.keys()),
+                "blackboard_id": getattr(self.blackboard, 'task_id', None),
+            })
+
             for filename, content in code_files.items():
                 self.blackboard.add_artifact(
                     name=f"code:{filename}",
@@ -1148,6 +1334,20 @@ class CoderAgent(BaseEnhancedAgent):
                     content_type="code",
                     created_by=self.AGENT_TYPE,
                 )
+                dbg.log_blackboard_artifact(
+                    source="CoderAgent",
+                    artifact_name=f"code:{filename}",
+                    content_type="code",
+                    content_preview=content[:300] if content else "(empty)",
+                    created_by=self.AGENT_TYPE,
+                )
+
+            # Debug: verify artifacts were saved
+            saved_artifacts = self.blackboard.list_artifacts(content_type="code")
+            dbg._write_log("coder_artifacts_after_save", {
+                "saved_count": len(saved_artifacts),
+                "saved_names": [a.name for a in saved_artifacts],
+            })
 
             # 6. 发布完成事件
             self._emit_event(EventType.AGENT_COMPLETED, {
@@ -1184,11 +1384,25 @@ class CoderAgent(BaseEnhancedAgent):
         self,
         task: str,
         plan: str,
-        existing_code: Dict[str, str]
+        existing_code: Dict[str, str],
+        dispatch_context: Optional[Dict[str, Any]] = None,
     ) -> tuple:
-        """构建编码 prompt，返回 (system_prompt, task_context) 便于流式 one-shot 调用。"""
+        """构建编码 prompt，返回 (system_prompt, task_context) 便于流式 one-shot 调用；可含 memory_context。"""
         work_dir = (self.blackboard.get_context("work_dir") or "").strip()
         prompt_context = {"work_dir": work_dir or "<未设置，请使用相对路径如 calculator.py>"}
+
+        memory_blob = ""
+        if dispatch_context:
+            memory_context = dispatch_context.get("memory_context") or []
+            if memory_context:
+                parts = []
+                for m in memory_context[-8:]:
+                    role = m.get("role", "")
+                    content = (m.get("content") or "")[:1500]
+                    if content.strip():
+                        parts.append(f"[{role}]: {content}")
+                if parts:
+                    memory_blob = "\n\n## 历史上下文（本 agent 记忆）\n\n" + "\n\n".join(parts) + "\n\n---\n\n"
 
         system_prompt = self._load_system_prompt(context=prompt_context)
 
@@ -1198,8 +1412,7 @@ class CoderAgent(BaseEnhancedAgent):
         )
 
         task_context = f"""
-
----
+{memory_blob}---
 
 ## 当前任务
 
@@ -1218,17 +1431,89 @@ class CoderAgent(BaseEnhancedAgent):
         return (system_prompt, task_context)
 
     def _parse_code(self, response: str) -> Dict[str, str]:
-        """解析代码文件"""
+        """解析代码文件
+
+        支持多种格式：
+        1. ```python filename="xxx.py"\n代码 ```
+        2. ```cpp\n/path/to/file.cpp\n代码 ```
+        3. ```python\n# filename: xxx.py\n代码 ```
+        """
         import re
         files = {}
 
-        # 匹配 ```python filename="..." ... ``` 或 ```python path/to/file.py ... ```
-        pattern = r'```python(?:\s+filename=["\']([^"\']+)["\']|\s+([^\n]+))?\n(.*?)\n```'
+        # Debug logging
+        from mini_coder.utils.debug_logger import get_debug_logger
+        dbg = get_debug_logger()
 
-        for match in re.finditer(pattern, response, re.DOTALL):
-            filename = match.group(1) or match.group(2) or "unknown.py"
-            content = match.group(3)
-            files[filename.strip()] = content
+        dbg._write_log("parse_code_start", {
+            "response_len": len(response) if response else 0,
+            "response_preview": (response[:500] if response else "")[:500],
+        })
+
+        # 匹配所有代码块
+        code_block_pattern = r'```(\w+)\n(.*?)\n```'
+        for match in re.finditer(code_block_pattern, response, re.DOTALL):
+            lang = match.group(1).lower()
+            block_content = match.group(2)
+            lines = block_content.split('\n')
+
+            if not lines:
+                continue
+
+            filename = None
+            code_start_line = 0
+
+            # 尝试从第一行提取文件名
+            first_line = lines[0].strip()
+
+            # 格式1: 第一行是绝对路径 /root/.../file.cpp
+            if first_line.startswith('/') and ('.' in first_line or first_line.endswith('.h')):
+                filename = first_line.split('/')[-1]  # 只取文件名
+                code_start_line = 1
+            # 格式2: 第一行是相对路径 file.cpp 或 path/to/file.cpp
+            elif re.match(r'^[\w\-/.]+\.\w+$', first_line):
+                filename = first_line.split('/')[-1]  # 只取文件名
+                code_start_line = 1
+            # 格式3: 第一行是注释形式的文件名 # filename: xxx.py 或 // file: xxx.cpp
+            elif first_line.startswith('#') or first_line.startswith('//'):
+                fname_match = re.search(r'(?:filename|file):\s*(\S+)', first_line)
+                if fname_match:
+                    filename = fname_match.group(1).split('/')[-1]
+                    code_start_line = 1
+
+            # 如果没有提取到文件名，根据语言生成默认名
+            if not filename:
+                ext_map = {
+                    'python': 'main.py', 'cpp': 'main.cpp', 'c++': 'main.cpp',
+                    'c': 'main.c', 'java': 'Main.java', 'go': 'main.go',
+                    'rs': 'main.rs', 'rust': 'main.rs', 'js': 'main.js',
+                    'ts': 'main.ts', 'javascript': 'main.js', 'typescript': 'main.ts',
+                    'sh': 'script.sh', 'bash': 'script.sh', 'makefile': 'Makefile',
+                    'yaml': 'config.yaml', 'yml': 'config.yml', 'json': 'config.json',
+                    'toml': 'config.toml', 'md': 'README.md',
+                }
+                filename = ext_map.get(lang, f'main.{lang}')
+
+            # 提取代码内容
+            code_lines = lines[code_start_line:] if code_start_line > 0 else lines
+            content = '\n'.join(code_lines)
+
+            # 清理文件名
+            filename = filename.strip().lstrip('/')
+
+            files[filename] = content
+
+            dbg._write_log("parse_code_match", {
+                "lang": lang,
+                "filename": filename,
+                "content_len": len(content),
+                "first_line": first_line[:50] if first_line else "",
+            })
+
+        dbg._write_log("parse_code_result", {
+            "files_count": len(files),
+            "filenames": list(files.keys()),
+        })
 
         return files
 
@@ -1286,7 +1571,10 @@ class TesterAgent(BaseEnhancedAgent):
         self._command_executor = command_executor
 
     def execute(
-        self, task: str, stream_callback: Optional[Callable[[str], None]] = None
+        self,
+        task: str,
+        stream_callback: Optional[Callable[[str], None]] = None,
+        context: Optional[Dict[str, Any]] = None,
     ) -> EnhancedAgentResult:
         """执行测试任务"""
         self._start_time = time.time()

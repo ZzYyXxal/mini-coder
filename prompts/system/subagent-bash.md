@@ -18,7 +18,8 @@ Respond in the same language as the user.
 ## Command policy
 
 - **Direct execution**: pytest, mypy, flake8, black --check, ruff, ls, cat, head, tail, pwd, git status/log/diff/branch, python/python -m.
-- **Forbidden**: rm -rf, mkfs, chmod 777, curl|bash, dd, sudo, etc. (see project blacklist).
+- **Fuzzy requests (single_command)**: When the user asks in natural language (e.g. “读取所有文件”, “list and read all files”, “递归查看目录”), the agent may resolve it to a single command. For “read all files (including subdirs)” use: `find . -type f -exec cat {} \;` or `find . -type f | xargs cat`. For “list all files recursively”: `find . -type f` or `find . -type f -print`. These are allowed in the working directory.
+- **Forbidden**: rm -rf (outside work dir), mkfs, chmod 777, curl|bash, dd, sudo, etc. (see project blacklist).
 - **Require confirmation**: pip install, git commit/push, npm install, etc. (execute only after user/main agent confirmation).
 
 ---

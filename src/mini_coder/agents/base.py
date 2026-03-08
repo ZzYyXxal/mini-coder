@@ -392,111 +392,7 @@ class AgentTeam:
 
 
 # ==================== Lightweight Subagents (无需 Blackboard) ====================
-
-class ExplorerCapabilities(AgentCapabilities):
-    """Explorer Agent 能力"""
-
-    def __init__(self) -> None:
-        super().__init__(
-            allowed_tools={"Read", "Glob", "Grep", "Command_ls", "Command_cat", "Command_head", "Command_tail", "Command_git_status", "Command_git_log", "Command_git_diff"},
-            allowed_read_patterns=["**/*"],
-            allowed_write_patterns=[],  # 只读，不能写
-            max_tool_calls=15,
-            requires_confirmation=False
-        )
-
-
-class ExplorerAgent(BaseAgent):
-    """Explorer Agent - 只读代码库搜索专家
-
-    职责:
-    - 快速探索代码库结构
-    - 查找文件和代码位置
-    - 理解模块依赖关系
-
-    工具权限:
-    - 只读工具：Read, Glob, Grep
-    - 只读命令：ls, git status, git log, git diff
-    """
-
-    AGENT_TYPE = "explorer"
-    DEFAULT_PROMPT_PATH = "subagent-explorer"
-
-    def __init__(self, llm_service: Any, config: Optional[AgentConfig] = None) -> None:
-        if config is None:
-            config = AgentConfig(
-                name="ExplorerAgent",
-                description="Read-only codebase explorer",
-                tool_filter=ReadOnlyFilter(),
-                max_iterations=10,
-                prompt_path=self.DEFAULT_PROMPT_PATH,
-            )
-        super().__init__(llm_service, config)
-        self._capabilities = ExplorerCapabilities()
-
-    def _get_builtin_prompt(self) -> str:
-        """获取内置兜底 prompt"""
-        return """You are the Explorer Agent - a read-only codebase search specialist.
-
-Constraints: Read-Only Mode
-- You MUST NOT create, modify, or delete files
-- You MUST NOT use Write or Edit tools
-- You can only use: Read, Grep, Glob, and read-only Bash commands
-
-Behavior:
-- Adjust exploration depth based on request (quick/medium/thorough)
-- Report all file paths using absolute paths
-- Be concise, avoid emoji
-- Parallelize independent searches for efficiency
-
-Output:
-Report findings: files/code locations discovered, key conclusions, relevance to request."""
-
-    def execute(
-        self,
-        task: str,
-        context: Optional[Dict[str, Any]] = None,
-        stream_callback: Optional[Any] = None,
-    ) -> AgentResult:
-        """执行探索任务；支持 stream_callback 时流式输出。"""
-        self.state.current_task = task
-        self.state.is_busy = True
-
-        try:
-            user_prompt = self._build_explorer_prompt(task, context or {})
-            if stream_callback is not None:
-                response = self._invoke_llm_stream(
-                    user_prompt, stream_callback, _prompt_context=context or {}
-                )
-            else:
-                response = self._invoke_llm(user_prompt, _prompt_context=context or {})
-
-            self.state.is_busy = False
-
-            return AgentResult(
-                success=True,
-                output=response,
-                artifacts={"exploration_result.md": response}
-            )
-
-        except Exception as e:
-            self.state.last_error = str(e)
-            self.state.is_busy = False
-            return AgentResult(
-                success=False,
-                error=str(e)
-            )
-
-    def _build_explorer_prompt(self, task: str, context: Dict[str, Any]) -> str:
-        """构建探索 prompt"""
-        return f"""Task: {task}
-
-Context:
-{context.get('analysis', '')}
-
-Please explore the codebase to find relevant files and understand the structure.
-Report findings with absolute file paths and brief explanations."""
-
+# 说明：Explorer 已合并入 Bash Agent，由 Bash 负责只读探索（ls/find/cat 等）与终端/测试。
 
 class ReviewerCapabilities(AgentCapabilities):
     """Reviewer Agent 能力"""
@@ -569,6 +465,30 @@ Output Format (STRICT BINARY CHOICE):
         self.state.current_task = task
         self.state.is_busy = True
 
+        # Debug logging
+        from mini_coder.utils.debug_logger import get_debug_logger
+        dbg = get_debug_logger()
+        dbg.log_agent_execute(
+            agent_type="reviewer",
+            task_preview=task[:100] if task else "",
+            context_keys=list(context.keys()) if context else [],
+            context_has_plan=bool(context.get("plan")) if context else False,
+            context_has_code=bool(context.get("code")) if context else False,
+        )
+
+        # Debug: dump prompt for inspection
+        try:
+            plan_preview = (context.get("plan") or "")[:500] if context else ""
+            code_preview = (context.get("code") or "")[:500] if context else ""
+            dbg._write_log("reviewer_context_detail", {
+                "plan_len": len(context.get("plan") or "") if context else 0,
+                "code_len": len(context.get("code") or "") if context else 0,
+                "plan_preview": plan_preview,
+                "code_preview": code_preview,
+            })
+        except Exception:
+            pass
+
         try:
             user_prompt = self._build_reviewer_prompt(task, context or {})
             response = self._invoke_llm(user_prompt)
@@ -603,7 +523,18 @@ Output Format (STRICT BINARY CHOICE):
         """Build reviewer prompt (format aligned with prompts/system/subagent-reviewer.md)."""
         plan = context.get("plan", "")
         code = context.get("code", "")
-        return f"""Task: {task}
+        memory_context = context.get("memory_context") or []
+        memory_blob = ""
+        if memory_context:
+            parts = []
+            for m in memory_context[-10:]:
+                role = m.get("role", "")
+                content = (m.get("content") or "")[:2000]
+                if content.strip():
+                    parts.append(f"[{role}]: {content}")
+            if parts:
+                memory_blob = "Previous context (for continuity):\n" + "\n\n".join(parts) + "\n\n"
+        return f"""{memory_blob}Task: {task}
 
 Implementation Plan (for architecture alignment):
 {plan}
@@ -667,12 +598,21 @@ class BashAgent(BaseAgent):
         self._command_tool = command_tool
         self._work_dir = work_dir or ""
 
-    def _run_command(self, command: str, timeout: int = 120) -> Dict[str, Any]:
-        """执行单条命令：优先用 CommandTool（限制工作目录与安全策略），否则用 command_executor，否则模拟。"""
+    def _run_command(
+        self, command: str, timeout: int = 120, cwd: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """执行单条命令：优先用 CommandTool（限制工作目录与安全策略），否则用 command_executor，否则模拟。
+
+        Args:
+            command: 要执行的命令
+            timeout: 超时秒数
+            cwd: 可选工作目录，若传入则覆盖 self._work_dir（用于 confirm_save 时从 context 注入 work_dir）
+        """
+        effective_cwd = (cwd or self._work_dir or "").strip() or None
         if self._command_tool is not None:
             params = {"command": command, "timeout": timeout}
-            if self._work_dir:
-                params["cwd"] = self._work_dir
+            if effective_cwd:
+                params["cwd"] = effective_cwd
             resp = self._command_tool.run(params)
             exit_code = (resp.data or {}).get("exit_code", -1 if resp.error_code else 0)
             success = resp.error_code is None and exit_code == 0
@@ -683,6 +623,27 @@ class BashAgent(BaseAgent):
             success, stdout, stderr = self._command_executor(command, timeout)
             return {"success": success, "stdout": stdout or "", "stderr": stderr or ""}
         return {"success": True, "stdout": "(simulated)", "stderr": ""}
+
+    def _resolve_fuzzy_command(self, task: str) -> Optional[str]:
+        """将模糊请求（如「读取所有文件」）解析为一条可执行的 shell 命令。失败或非只读则返回 None。"""
+        if not task or not task.strip():
+            return None
+        try:
+            prompt = self._FUZZY_CMD_PROMPT.format(task=task.strip())
+            resp = self.llm_service.chat(prompt)
+            if not resp:
+                return None
+            line = resp.strip().split("\n")[0].strip()
+            # 去掉可能的 markdown 代码块
+            if line.startswith("```"):
+                line = line.lstrip("`").strip()
+                if line.startswith("bash") or line.startswith("sh"):
+                    line = line.split(maxsplit=1)[-1]
+            if line and len(line) < 2000:
+                return line
+        except Exception as e:
+            logger.debug("BashAgent fuzzy resolve failed: %s", e)
+        return None
 
     def _get_builtin_prompt(self) -> str:
         """获取内置兜底 prompt"""
@@ -703,6 +664,14 @@ Generate quality report with test results, type check, code style, and coverage.
     # 单条命令安全前缀（仅当 bash_mode=single_command 且首词在此列表内才执行，与 security.SAFE_READ_ONLY 一致）
     _SINGLE_CMD_PREFIXES = ("echo", "grep", "cat", "head", "tail", "ls", "pwd", "wc", "find", "whoami", "date")
 
+    # 模糊请求转命令的 prompt（用于「读取所有文件」等自然语言）
+    _FUZZY_CMD_PROMPT = """用户请求：{task}
+
+请只输出一条可在当前工作目录下执行的 shell 命令，不要解释。要求：
+- 仅使用只读操作：ls、find、cat、head、tail、grep 等；若需「读取所有文件（含子目录）」请用 find . -type f -exec cat {{}} \\; 或 find . -type f | xargs cat
+- 不要写 rm、mv、chmod、重定向到文件等写操作
+- 只输出命令本身，一行，不要换行和注释"""
+
     def execute(
         self,
         task: str,
@@ -721,36 +690,76 @@ Generate quality report with test results, type check, code style, and coverage.
         ctx = context or {}
         bash_mode = ctx.get("bash_mode")
 
+        # Debug logging for Bash agent
+        from mini_coder.utils.debug_logger import get_debug_logger
+        dbg = get_debug_logger()
+        dbg.log_agent_execute(
+            agent_type="bash",
+            task_preview=task[:100] if task else "",
+            context_keys=list(ctx.keys()),
+            context_work_dir=ctx.get("work_dir"),
+        )
+        dbg._write_log("bash_agent_state", {
+            "bash_mode": bash_mode,
+            "work_dir_from_context": ctx.get("work_dir"),
+            "work_dir_from_self": self._work_dir,
+            "has_command_tool": self._command_tool is not None,
+            "has_command_executor": self._command_executor is not None,
+        })
+
         try:
             task_stripped = task.strip()
             first_word = task_stripped.split(maxsplit=1)[0].lower() if task_stripped else ""
 
             # 1) confirm_save：调用方判定为「写入/保存到本地」意图，只列目录
             if bash_mode == "confirm_save" and (self._command_tool or self._command_executor):
-                result = self._run_command("ls -la .", timeout=10)
+                # 优先使用 context 中的 work_dir（派发时注入），避免 blackboard 未设置时 cwd 为空
+                confirm_cwd = (ctx.get("work_dir") or self._work_dir or "").strip() or None
+                dbg._write_log("bash_confirm_save", {
+                    "confirm_cwd": confirm_cwd,
+                    "work_dir_from_context": ctx.get("work_dir"),
+                    "work_dir_from_self": self._work_dir,
+                })
+                result = self._run_command("ls -la .", timeout=10, cwd=confirm_cwd)
                 self.state.is_busy = False
                 out = (result.get("stdout") or "").strip()
+                err = (result.get("stderr") or "").strip()
+                success = result.get("success", True)
+                if success:
+                    msg = "代码已写入工作目录，当前文件列表：\n\n" + (out or "(无文件列表)")
+                else:
+                    # 命令失败时展示 stderr，避免只显示「(无文件列表)」掩盖真实原因（如不安全的工作目录）
+                    msg = "代码已写入工作目录，当前文件列表：\n\n" + (out or "(无文件列表)")
+                    if err:
+                        msg += "\n\n[执行失败] " + err
                 return AgentResult(
-                    success=True,
-                    output="代码已写入工作目录，当前文件列表：\n\n" + (out or "(无文件列表)"),
+                    success=success,
+                    output=msg,
                     artifacts={"directory_listing.txt": out or ""},
                 )
 
-            # 2) single_command：仅当首词在白名单内时执行该命令
+            # 2) single_command：执行用户给出的命令，或将模糊请求（如「读取所有文件」）转成命令后执行
             if bash_mode == "single_command" and (self._command_tool or self._command_executor):
-                if first_word in self._SINGLE_CMD_PREFIXES:
-                    result = self._run_command(task_stripped, timeout=60)
-                    self.state.is_busy = False
-                    out = (result.get("stdout") or "") + ((result.get("stderr") or "").strip() and f"\n[stderr]\n{result['stderr']}" or "")
-                    return AgentResult(
-                        success=result.get("success", False),
-                        output=out.strip() or "(无输出)",
-                        artifacts={"command_output.txt": out},
-                    )
+                cmd_to_run = task_stripped
+                if first_word not in self._SINGLE_CMD_PREFIXES:
+                    # 模糊请求：用 LLM 转成一条只读命令（如 find . -type f -exec cat {} \;）
+                    resolved = self._resolve_fuzzy_command(task_stripped)
+                    if resolved:
+                        cmd_to_run = resolved
+                        logger.info("[BashAgent] Resolved fuzzy request to command: %s", cmd_to_run[:80])
+                    else:
+                        self.state.is_busy = False
+                        return AgentResult(
+                            success=False,
+                            output=f"单条命令模式仅支持首词为 {self._SINGLE_CMD_PREFIXES} 之一的命令，或可解析的模糊请求（如「读取所有文件」）。当前首词「{first_word}」无法解析。",
+                        )
+                result = self._run_command(cmd_to_run, timeout=120)
                 self.state.is_busy = False
+                out = (result.get("stdout") or "") + ((result.get("stderr") or "").strip() and f"\n[stderr]\n{result['stderr']}" or "")
                 return AgentResult(
-                    success=False,
-                    output=f"单条命令模式仅支持首词为 {self._SINGLE_CMD_PREFIXES} 之一的命令，当前首词「{first_word}」不在列表中。",
+                    success=result.get("success", False),
+                    output=out.strip() or "(无输出)",
+                    artifacts={"command_output.txt": out},
                 )
 
             # 3) quality_report：仅当调用方显式传入时跑完整质量流水线（见 docs/quality-pipeline-spec.md）
@@ -1047,12 +1056,12 @@ You do not edit code or run terminal commands; you answer questions and point to
 
 ### 2. Multi-Agent System & Workflow
 - Agent roles:
-  - Explorer (read-only search)
+  - Bash（含只读探索与终端/测试）
   - Planner (TDD planning)
   - Coder (implementation)
   - Reviewer (quality + architecture)
   - Bash (tests/lint/typecheck)
-- Workflow: Explorer (optional) → Planner → Coder → Reviewer → Bash
+- Workflow: Planner → Coder → Reviewer → Bash（Bash 含只读探索与终端/测试）
 - Loops on review reject or test failure
 - Dynamic prompt loading: `prompts/system/*.md`, placeholder `{{identifier}}`, PromptLoader
 - Agent config: `config/subagents.yaml`, tool filters (ReadOnlyFilter, FullAccessFilter, etc.)

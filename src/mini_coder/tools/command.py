@@ -181,7 +181,44 @@ class CommandTool(BaseTool):
             timeout: 可选的超时时间
             cwd: 可选的工作目录（若设置了 allowed_paths 则必须在其内）
         """
-        # Layer 1: 黑名单检查
+        # Layer 1: 白名单优先 - 安全只读命令（如 ls -la .）直接放行，避免因参数含 "." 被黑名单误判
+        if self._executor._security.is_safe_readonly(command):
+            logger.debug(f"[CommandTool] Command SAFE (whitelist): {command[:50]}...")
+            self.notify_event("security_check", {
+                "command": command,
+                "category": "safe",
+            })
+            return self._executor.execute(command, timeout=timeout, cwd=cwd)
+
+        # Layer 1.5: 工作目录内操作 - 默认允许在配置的工作目录（如 target）下读/写/删，不弹确认、不判黑名单
+        if (
+            cwd
+            and getattr(self._executor, "allowed_paths", None)
+            and self._executor._is_safe_path(cwd)
+            and self._executor._security.is_work_dir_safe_command(command)
+        ):
+            logger.debug(f"[CommandTool] Command allowed in work dir (cwd={cwd[:50]}...): {command[:50]}...")
+            self.notify_event("security_check", {
+                "command": command,
+                "category": "work_dir",
+            })
+            return self._executor.execute(command, timeout=timeout, cwd=cwd)
+
+        # Layer 1.6: 工作目录内只读管道 - 支持「读取所有文件/递归」等：find ... -exec cat {} \; 或 find ... | xargs cat
+        if (
+            cwd
+            and getattr(self._executor, "allowed_paths", None)
+            and self._executor._is_safe_path(cwd)
+            and self._executor._security.is_work_dir_safe_readonly_pipeline(command)
+        ):
+            logger.debug(f"[CommandTool] Command allowed (work dir readonly pipeline): {command[:60]}...")
+            self.notify_event("security_check", {
+                "command": command,
+                "category": "work_dir_readonly_pipeline",
+            })
+            return self._executor.execute(command, timeout=timeout, cwd=cwd)
+
+        # Layer 2: 黑名单检查
         if self._executor._security.is_banned(command):
             logger.warning(f"[CommandTool] Command BANNED: {command[:50]}...")
             self.notify_event("security_check", {
@@ -194,15 +231,6 @@ class CommandTool(BaseTool):
                 stderr="命令被禁止：包含危险操作",
                 exit_code=1,
             )
-
-        # Layer 2: 白名单检查 - 安全命令直接执行
-        if self._executor._security.is_safe_readonly(command):
-            logger.debug(f"[CommandTool] Command SAFE (whitelist): {command[:50]}...")
-            self.notify_event("security_check", {
-                "command": command,
-                "category": "safe",
-            })
-            return self._executor.execute(command, timeout=timeout, cwd=cwd)
 
         # Layer 3: 根据安全模式处理
         if self.security_mode == SecurityMode.STRICT:

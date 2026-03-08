@@ -41,6 +41,12 @@ from .note_relations import (
 )
 from .embeddings import LocalEmbeddingService, EmbeddingConfig, EMBEDDINGS_AVAILABLE
 from .semantic_search import SemanticNoteSearch, SemanticSearchConfig
+from .hook import MemoryHook
+from .agent_memory import (
+    AgentMemoryRegistry,
+    AGENT_TYPES_WITH_NOTES,
+    AGENT_TYPES_FOR_MEMORY,
+)
 
 __all__ = [
     # Main interface
@@ -85,4 +91,9 @@ __all__ = [
     # Semantic Search
     "SemanticNoteSearch",
     "SemanticSearchConfig",
+    "MemoryHook",
+    # Per-agent memory
+    "AgentMemoryRegistry",
+    "AGENT_TYPES_WITH_NOTES",
+    "AGENT_TYPES_FOR_MEMORY",
 ]
