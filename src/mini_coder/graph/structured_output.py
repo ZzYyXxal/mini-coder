@@ -220,6 +220,46 @@ class BashOutput:
         return json.dumps(self.to_dict(), indent=2, ensure_ascii=False)
 
 
+# ==================== Router Output ====================
+
+class RouterDestination(str, Enum):
+    """Routing destinations."""
+    EXPLORER = "explorer"
+    PLANNER = "planner"
+    CODER = "coder"
+    REVIEWER = "reviewer"
+    BASH = "bash"
+    GENERAL_PURPOSE = "general_purpose"
+
+
+@dataclass
+class RouterOutput:
+    """Structured output from Router agent.
+
+    Determines which agent should handle the user request.
+    """
+    destination: RouterDestination
+    reasoning: str  # Why this agent was chosen
+    bash_mode: Optional[str] = None  # Only for BASH destination: "quality_report", "single_command", "confirm_save"
+    command: Optional[str] = None  # Only for single_command mode
+    confidence: float = 1.0  # 0.0 - 1.0
+
+    def to_dict(self) -> Dict[str, Any]:
+        d = {
+            "destination": self.destination.value,
+            "reasoning": self.reasoning,
+            "confidence": self.confidence,
+        }
+        if self.bash_mode:
+            d["bash_mode"] = self.bash_mode
+        if self.command:
+            d["command"] = self.command
+        return d
+
+    def to_json(self) -> str:
+        return json.dumps(self.to_dict(), indent=2, ensure_ascii=False)
+
+
 # ==================== Exports ====================
 
 __all__ = [
@@ -240,4 +280,7 @@ __all__ = [
     # Bash
     "TestResult",
     "BashOutput",
+    # Router
+    "RouterDestination",
+    "RouterOutput",
 ]

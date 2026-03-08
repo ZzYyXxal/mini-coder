@@ -29,6 +29,8 @@ from .structured_output import (
     ExplorerOutput,
     TestResult,
     BashOutput,
+    RouterDestination,
+    RouterOutput,
 )
 from .few_shot_prompts import (
     CODER_FEW_SHOT_PROMPT,
@@ -36,6 +38,7 @@ from .few_shot_prompts import (
     REVIEWER_FEW_SHOT_PROMPT,
     EXPLORER_FEW_SHOT_PROMPT,
     BASH_FEW_SHOT_PROMPT,
+    ROUTER_FEW_SHOT_PROMPT,
 )
 
 
@@ -123,6 +126,15 @@ class BashOutputModel(BaseModel):
     lint_passed: Optional[bool] = None
     commands_run: List[str] = []
     errors: List[str] = []
+
+
+class RouterOutputModel(BaseModel):
+    """Pydantic model for RouterOutput."""
+    destination: str  # "explorer", "planner", "coder", "reviewer", "bash", "general_purpose"
+    reasoning: str
+    bash_mode: Optional[str] = None  # "quality_report", "single_command", "confirm_save"
+    command: Optional[str] = None
+    confidence: float = 1.0
 
 
 # ==================== Conversion Functions ====================
@@ -227,6 +239,17 @@ def model_to_bash_output(model: BashOutputModel) -> BashOutput:
     )
 
 
+def model_to_router_output(model: RouterOutputModel) -> RouterOutput:
+    """Convert Pydantic model to dataclass."""
+    return RouterOutput(
+        destination=RouterDestination(model.destination),
+        reasoning=model.reasoning,
+        bash_mode=model.bash_mode,
+        command=model.command,
+        confidence=model.confidence,
+    )
+
+
 # ==================== Agent Factory Functions ====================
 
 def create_structured_llm(
@@ -326,6 +349,18 @@ def create_bash_agent(llm: BaseChatModel) -> Any:
         Structured LLM that produces BashOutputModel
     """
     return create_structured_llm(llm, BashOutputModel, BASH_FEW_SHOT_PROMPT)
+
+
+def create_router_agent(llm: BaseChatModel) -> Any:
+    """Create a Router agent with structured output.
+
+    Args:
+        llm: Base chat model
+
+    Returns:
+        Structured LLM that produces RouterOutputModel
+    """
+    return create_structured_llm(llm, RouterOutputModel, ROUTER_FEW_SHOT_PROMPT)
 
 
 # ==================== Convenience Functions ====================
@@ -440,6 +475,25 @@ async def ainvoke_explorer(
     return model_to_explorer_output(model)
 
 
+async def ainvoke_router(
+    llm: BaseChatModel,
+    user_request: str,
+) -> RouterOutput:
+    """Invoke Router agent and return structured output.
+
+    Args:
+        llm: Base chat model
+        user_request: The user's request to route
+
+    Returns:
+        RouterOutput dataclass with destination and bash_mode
+    """
+    agent = create_router_agent(llm)
+
+    model = await agent.ainvoke([HumanMessage(content=user_request)])
+    return model_to_router_output(model)
+
+
 # ==================== Exports ====================
 
 __all__ = [
@@ -454,12 +508,14 @@ __all__ = [
     "ExplorerOutputModel",
     "TestResultModel",
     "BashOutputModel",
+    "RouterOutputModel",
     # Conversion functions
     "model_to_coder_output",
     "model_to_planner_output",
     "model_to_reviewer_output",
     "model_to_explorer_output",
     "model_to_bash_output",
+    "model_to_router_output",
     # Agent factory functions
     "create_structured_llm",
     "create_coder_agent",
@@ -467,9 +523,11 @@ __all__ = [
     "create_reviewer_agent",
     "create_explorer_agent",
     "create_bash_agent",
+    "create_router_agent",
     # Convenience functions
     "ainvoke_coder",
     "ainvoke_planner",
     "ainvoke_reviewer",
     "ainvoke_explorer",
+    "ainvoke_router",
 ]

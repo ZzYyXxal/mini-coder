@@ -43,7 +43,7 @@ The project uses ZHIPU AI API as the backend:
 
 ### Overview
 
-The mini-coder project utilizes a structured multi-agent system for code generation and management. The workflow is orchestrated by Claude Code and involves several specialized subagents, each with distinct responsibilities.
+The mini-coder project utilizes a structured multi-agent system for code generation and management, based on langgraph and langsmith. The workflow is orchestrated by Claude Code and involves several specialized subagents, each with distinct responsibilities.
 
 ### Agent Roles
 

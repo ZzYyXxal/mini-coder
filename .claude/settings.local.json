@@ -46,7 +46,10 @@
       "mcp__zread__read_file",
       "WebFetch(domain:langchain-ai.github.io)",
       "WebFetch(domain:github.com)",
-      "Bash(git restore:*)"
+      "Bash(git restore:*)",
+      "Bash(PYTHONIOENCODING=utf-8 python -c \"import ast; ast.parse\\(open\\('src/mini_coder/agents/enhanced.py', encoding='utf-8'\\).read\\(\\)\\); print\\('OK'\\)\" 2>&1)",
+      "mcp__web-reader__webReader",
+      "Bash(rm -f \"=0.1.0\" \"=0.2.0\" \"=0.3.0\" && git reset HEAD \"=0.1.0\" \"=0.2.0\" \"=0.3.0\" 2>/dev/null; git add -u && git status --short)"
     ]
   }
 }

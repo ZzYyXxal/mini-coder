@@ -46,6 +46,9 @@ from .structured_output import (
     # Bash
     TestResult,
     BashOutput,
+    # Router
+    RouterDestination,
+    RouterOutput,
 )
 
 __all__ = [
@@ -84,4 +87,6 @@ __all__ = [
     "ExplorerOutput",
     "TestResult",
     "BashOutput",
+    "RouterDestination",
+    "RouterOutput",
 ]

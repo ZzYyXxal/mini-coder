@@ -284,6 +284,81 @@ class TestBashOutput:
         assert len(d["errors"]) == 1
 
 
+class TestRouterOutput:
+    """Tests for Router structured output."""
+
+    def test_router_output_to_dict(self):
+        """RouterOutput should convert to dict correctly."""
+        from mini_coder.graph.structured_output import (
+            RouterDestination,
+            RouterOutput,
+        )
+
+        output = RouterOutput(
+            destination=RouterDestination.CODER,
+            reasoning="User wants to implement new code",
+            confidence=0.95,
+        )
+
+        d = output.to_dict()
+        assert d["destination"] == "coder"
+        assert d["reasoning"] == "User wants to implement new code"
+        assert d["confidence"] == 0.95
+
+    def test_router_output_with_bash_mode(self):
+        """RouterOutput should include bash_mode for bash destination."""
+        from mini_coder.graph.structured_output import (
+            RouterDestination,
+            RouterOutput,
+        )
+
+        output = RouterOutput(
+            destination=RouterDestination.BASH,
+            reasoning="User wants to run tests",
+            bash_mode="quality_report",
+            confidence=0.99,
+        )
+
+        d = output.to_dict()
+        assert d["destination"] == "bash"
+        assert d["bash_mode"] == "quality_report"
+        assert "command" not in d  # command is None, not included
+
+    def test_router_output_with_command(self):
+        """RouterOutput should include command for single_command mode."""
+        from mini_coder.graph.structured_output import (
+            RouterDestination,
+            RouterOutput,
+        )
+
+        output = RouterOutput(
+            destination=RouterDestination.BASH,
+            reasoning="User wants to list files",
+            bash_mode="single_command",
+            command="ls -la",
+            confidence=0.90,
+        )
+
+        d = output.to_dict()
+        assert d["bash_mode"] == "single_command"
+        assert d["command"] == "ls -la"
+
+    def test_router_low_confidence(self):
+        """RouterOutput should handle low confidence for ambiguous requests."""
+        from mini_coder.graph.structured_output import (
+            RouterDestination,
+            RouterOutput,
+        )
+
+        output = RouterOutput(
+            destination=RouterDestination.CODER,
+            reasoning="Ambiguous request, best guess is code modification",
+            confidence=0.60,
+        )
+
+        assert output.confidence < 0.75
+
+
 class TestJSONParsing:
     """Tests for parsing JSON from LLM output."""
 
