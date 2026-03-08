@@ -213,6 +213,9 @@ _ROUTER_DESTINATION_FALLBACK = {
     "bash": RouterDestination.BASH,
     "general_purpose": RouterDestination.GENERAL_PURPOSE,
     "general": RouterDestination.GENERAL_PURPOSE,
+    "mini_coder_guide": RouterDestination.MINI_CODER_GUIDE,
+    "guide": RouterDestination.MINI_CODER_GUIDE,
+    "help": RouterDestination.MINI_CODER_GUIDE,
 }
 
 

@@ -16,8 +16,16 @@ import json
 
 @dataclass
 class CodeChunk:
-    """A single code modification/creation."""
-    path: str  # File path (relative to project root)
+    """A single code modification/creation.
+
+    Attributes:
+        path: File path relative to project root. MUST be relative (e.g., "src/app.py").
+              Absolute paths (e.g., "/home/user/project/src/app.py") are NOT allowed.
+        action: Operation type - "create" for new files, "modify" for existing, "delete" for removal.
+        content: Full file content for "create", modified section for "modify", None for "delete".
+        description: Brief description of what this change does.
+    """
+    path: str  # File path (relative to project root, NOT absolute)
     action: Literal["create", "modify", "delete"]
     content: Optional[str] = None  # Full file content for create, diff for modify
     description: str = ""  # Brief description of changes
@@ -233,13 +241,24 @@ class BashOutput:
 # ==================== Router Output ====================
 
 class RouterDestination(str, Enum):
-    """Routing destinations."""
+    """Routing destinations.
+
+    Maps user requests to appropriate agents:
+        - EXPLORER: Read-only codebase search and exploration
+        - PLANNER: Requirements analysis and TDD planning
+        - CODER: Code implementation and modification
+        - REVIEWER: Code quality and architecture review
+        - BASH: Terminal execution and quality pipeline
+        - GENERAL_PURPOSE: Simple queries, greetings, general questions
+        - MINI_CODER_GUIDE: Usage instructions and how-to questions
+    """
     EXPLORER = "explorer"
     PLANNER = "planner"
     CODER = "coder"
     REVIEWER = "reviewer"
     BASH = "bash"
     GENERAL_PURPOSE = "general_purpose"
+    MINI_CODER_GUIDE = "mini_coder_guide"
 
 
 @dataclass

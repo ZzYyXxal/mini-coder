@@ -582,6 +582,10 @@ ROUTER_FEW_SHOT_PROMPT = """You are the **Router Agent** - responsible for routi
 6. **GENERAL_PURPOSE**: Quick read-only queries
    - Simple questions, greetings
 
+7. **MINI_CODER_GUIDE**: Usage instructions and how-to
+   - Questions about how to use mini-coder
+   - Configuration help, feature explanations
+
 ## Output Format (STRICT JSON)
 
 ```json
@@ -593,6 +597,12 @@ ROUTER_FEW_SHOT_PROMPT = """You are the **Router Agent** - responsible for routi
   "confidence": 0.0-1.0
 }
 ```
+
+## Confidence Score Guidelines
+
+- **>= 0.9**: High confidence - clear, explicit intent (e.g., "Run tests")
+- **0.7 - 0.9**: Medium confidence - reasonable interpretation
+- **< 0.7**: Low confidence - ambiguous request, may need clarification
 
 ## Examples
 
@@ -694,6 +704,34 @@ User: "Fix the bug"
 }
 ```
 
+### Example 8: Usage instructions
+
+User: "How do I configure mini-coder?"
+
+```json
+{
+  "destination": "mini_coder_guide",
+  "reasoning": "User is asking about how to use/configure mini-coder, route to guide",
+  "bash_mode": null,
+  "command": null,
+  "confidence": 0.95
+}
+```
+
+### Example 9: Help request
+
+User: "What can you help me with?"
+
+```json
+{
+  "destination": "mini_coder_guide",
+  "reasoning": "User wants to know capabilities and features of mini-coder",
+  "bash_mode": null,
+  "command": null,
+  "confidence": 0.92
+}
+```
+
 ## Rules
 
 1. Always provide clear reasoning
@@ -701,6 +739,7 @@ User: "Fix the bug"
 3. For test requests, use bash_mode: "quality_report"
 4. For simple commands, use bash_mode: "single_command"
 5. Lower confidence for ambiguous requests
+6. For usage/configuration questions, route to "mini_coder_guide"
 """
 
 # ==================== Exports ====================

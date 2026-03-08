@@ -389,6 +389,15 @@ class TestFallbackParsing:
         assert _safe_parse_router_destination("general") == RouterDestination.GENERAL_PURPOSE
         assert _safe_parse_router_destination("unknown_agent") == RouterDestination.GENERAL_PURPOSE
 
+    def test_router_destination_mini_coder_guide(self):
+        """Should correctly parse mini_coder_guide destination."""
+        from mini_coder.graph.output_parser import _safe_parse_router_destination
+        from mini_coder.graph.structured_output import RouterDestination
+
+        assert _safe_parse_router_destination("mini_coder_guide") == RouterDestination.MINI_CODER_GUIDE
+        assert _safe_parse_router_destination("guide") == RouterDestination.MINI_CODER_GUIDE
+        assert _safe_parse_router_destination("help") == RouterDestination.MINI_CODER_GUIDE
+
     def test_bash_output_with_mode(self):
         """BashOutput should include bash_mode_used."""
         from mini_coder.graph.structured_output import BashOutput
